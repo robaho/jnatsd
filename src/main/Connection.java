@@ -47,6 +47,7 @@ class Connection {
                 processLine(line);
             } catch(Exception e){
                 sendError(e);
+                e.printStackTrace();
             }
         }
     }
@@ -76,6 +77,9 @@ class Connection {
             }
             int ssid = Integer.parseInt(segs[index]);
             addSubscription(subject, group, ssid);
+        } else if("UNSUB".equals(segs[0])){
+            int ssid = Integer.parseInt(segs[1]);
+            removeSubscription(ssid);
         }
     }
 
@@ -87,13 +91,21 @@ class Connection {
             sendOK();
     }
 
+    private void removeSubscription(int ssid) throws IOException {
+        System.out.println("un-subscribing ssid = "+ssid);
+        Subscription s = new Subscription(this,ssid,"","");
+        server.removeSubscription(s);
+        if(isVerbose())
+            sendOK();
+    }
+
     private synchronized void sendOK() throws IOException {
         w.write("+OK\r\n".getBytes());
         w.flush();
     }
 
     private synchronized void sendError(Exception e) throws IOException {
-        w.write(("-ERR "+e.getMessage()+"\r\n").getBytes());
+        w.write(("-ERR "+e.toString()+"\r\n").getBytes());
         w.flush();
     }
 

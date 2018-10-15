@@ -22,6 +22,7 @@ public class Server {
     private volatile Map<String,SubscriptionMatch> cache = new ConcurrentHashMap();
 
     private static class SubscriptionMatch {
+        long lastUsed; // for LRU cache purge
         Set<Subscription> subs = new HashSet<>();
         Map<String,List<Subscription>> groups = new HashMap<>();
     }
@@ -69,6 +70,12 @@ public class Server {
         Map<String,List<Subscription>> groups = new HashMap<>();
 
         Subscription[] _subs = subs;
+
+        // TODO rather than linear search, since the subscriptions are sorted, a log(n) search
+        // can be used to find the next match
+        // TODO maybe store all connections for the same 'subscription' in a list by subscription
+        // to reduce the search comparisons, gets more complex with groups though
+
         Subscription s = new Subscription(null,0,subject,"");
         for(int i=0;i<_subs.length;i++) {
             Subscription sub = _subs[i];
@@ -94,6 +101,7 @@ public class Server {
     }
 
     private void processMessage(SubscriptionMatch match, String subject, byte[] replyb, byte[] data) {
+        match.lastUsed = System.currentTimeMillis();
         for(Subscription s : match.subs){
             try {
                 s.connection.sendMessage(s,subject,replyb,data);
@@ -158,4 +166,19 @@ public class Server {
             cache = new ConcurrentHashMap<>();
         }
     }
+    public void removeSubscription(Subscription s) {
+        synchronized(connections) {
+            Subscription[] copy = new Subscription[subs.length-1];
+            int dstI = 0;
+            for(int i=0;i<subs.length;i++) {
+                if(s.connection==subs[i].connection && s.ssid==subs[i].ssid)
+                    continue;
+                copy[dstI++]=subs[i];
+            }
+            subs=copy;
+            cache = new ConcurrentHashMap<>();
+        }
+    }
+
+
 }
