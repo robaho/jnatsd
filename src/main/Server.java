@@ -144,7 +144,8 @@ public class Server {
     }
 
     public String getInfoAsJSON() {
-        return "INFO {\"server_id\":\"8hPWDls9DjyXnFVf1AjnQq\",\"version\":\"1.3.1\",\"proto\":1,\"go\":\"go1.11\",\"host\":\"0.0.0.0\",\"port\":4222,\"max_payload\":1048576,\"client_id\":1}\r\n";
+        // TODO real server info object
+        return "INFO {\"server_id\":\"8hPWDls9DjyXnFVf1AjnQq\",\"version\":\"1.3.1\",\"proto\":1,\"java\":\"jdk1.8\",\"host\":\"0.0.0.0\",\"port\":4222,\"max_payload\":1048576,\"client_id\":1}\r\n";
     }
 
     public void addSubscription(Subscription s) {
