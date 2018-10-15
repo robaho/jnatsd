@@ -15,3 +15,5 @@ Need to implement server and client options.
 Use binary search for matching subscriptions.
 
 Purge subscription cache based on "old than X" method.
+
+Port many of the test cases from gnatsd to jnatsd.
