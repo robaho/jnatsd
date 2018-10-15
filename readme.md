@@ -8,6 +8,8 @@ The original is written is Go.
 
 Need to support "router mode".
 
+Add TLS connections.
+
 Need to implement server and client options.
 
 Use binary search for matching subscriptions.
