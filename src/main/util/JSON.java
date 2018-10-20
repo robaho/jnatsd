@@ -17,9 +17,10 @@ public class JSON {
             try {
                 if (field.getType() == int.class) {
                     json.add(field.getName(), (int) field.get(o));
+                } else if (field.getType() == boolean.class) {
+                    json.add(field.getName(),(Boolean)field.get(o));
                 } else {
                     json.add(field.getName(), (String)field.get(o));
-
                 }
             } catch (IllegalAccessException ignored) {
             }
@@ -38,8 +39,10 @@ public class JSON {
         for(JsonObject.Member m : jo){
             try {
                 Field field = o.getClass().getField(m.getName());
-                if(field.getType()==int.class){
-                    field.setInt(o,m.getValue().asInt());
+                if(field.getType()==int.class) {
+                    field.setInt(o, m.getValue().asInt());
+                } else if (field.getType()==boolean.class){
+                    field.setBoolean(o, m.getValue().asBoolean());
                 } else {
                     field.set(o,m.getValue().asString());
                 }
