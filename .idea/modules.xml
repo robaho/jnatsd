@@ -3,7 +3,6 @@
   <component name="ProjectModuleManager">
     <modules>
       <module fileurl="file://$PROJECT_DIR$/src/jnatsd.iml" filepath="$PROJECT_DIR$/src/jnatsd.iml" />
-      <module fileurl="file://$PROJECT_DIR$/nats-java.iml" filepath="$PROJECT_DIR$/nats-java.iml" />
     </modules>
   </component>
 </project>

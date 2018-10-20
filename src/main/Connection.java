@@ -1,5 +1,7 @@
 package com.robaho.jnatsd;
 
+import com.robaho.jnatsd.util.JSON;
+
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.IOException;
@@ -13,17 +15,21 @@ class Connection {
     private final Socket socket;
     private final String remote;
     private boolean closed;
+    private int clientID;
+    private boolean verbose;
 
     public Connection(Server server,Socket s) throws IOException {
         this.socket=s;
         this.server=server;
+
+        clientID = server.getNextClientID();
 
         remote = s.getRemoteSocketAddress().toString();
 
         r = new BufferedInputStream(s.getInputStream());
         w = new BufferedOutputStream(s.getOutputStream());
 
-        w.write(server.getInfoAsJSON().getBytes());
+        w.write(server.getInfoAsJSON(this).getBytes());
         w.flush();
     }
     void processConnection(){
@@ -53,22 +59,22 @@ class Connection {
     }
     private void processLine(String line) throws IOException {
         int index=1;
-//        System.out.println("rec: " + line);
+        System.out.println("rec: " + line);
         String[] segs = line.split("\\s+");
         segs[0]=segs[0].toUpperCase();
-        if ("PING".equals(segs[0])) {
-            w.write("PONG\r\n".getBytes());
-            w.flush();
-        } else if ("PUB".equals(segs[0])) {
+        if ("PUB".equals(segs[0])) {
             String subject = segs[index++];
             String reply = "";
-            if(segs.length==4){
+            if (segs.length == 4) {
                 reply = segs[index++];
             }
             int len = Integer.parseInt(segs[index]);
             byte[] data = new byte[len];
             readPayload(r, data);
             server.processMessage(subject, reply, data);
+        } else if ("PING".equals(segs[0])){
+            w.write("PONG\r\n".getBytes());
+            w.flush();
         } else if ("SUB".equals(segs[0])) {
             String subject = segs[index++];
             String group = "";
@@ -80,7 +86,15 @@ class Connection {
         } else if("UNSUB".equals(segs[0])){
             int ssid = Integer.parseInt(segs[1]);
             removeSubscription(ssid);
+        } else if("CONNECT".equals(segs[0])){
+            processConnectionOptions(segs[1]);
         }
+    }
+
+    private void processConnectionOptions(String json) {
+        ConnectionOptions opts = new ConnectionOptions();
+        JSON.load(json,opts);
+        verbose = opts.verbose;
     }
 
     private void addSubscription(String subject, String group, int ssid) throws IOException {
@@ -110,7 +124,7 @@ class Connection {
     }
 
     private boolean isVerbose() {
-        return true;
+        return verbose;
     }
 
     synchronized void sendMessage(Subscription sub,String subject, byte[] reply, byte[] msg) throws IOException {
@@ -174,5 +188,18 @@ class Connection {
 
     public boolean closed() {
         return closed;
+    }
+
+    public int getClientID() {
+        return clientID;
+    }
+
+    public static class ConnectionOptions {
+        public boolean verbose;
+        public boolean pedantic;
+        public boolean tls_required;
+        public String name;
+        public int protocol;
+        public boolean echo;
     }
 }
