@@ -16,7 +16,7 @@ class Connection {
     private final String remote;
     private boolean closed;
     private int clientID;
-    private boolean verbose;
+    private ConnectionOptions options;
 
     public Connection(Server server,Socket s) throws IOException {
         this.socket=s;
@@ -59,7 +59,7 @@ class Connection {
     }
     private void processLine(String line) throws IOException {
         int index=1;
-        System.out.println("rec: " + line);
+//        System.out.println("rec: " + line);
         String[] segs = line.split("\\s+");
         segs[0]=segs[0].toUpperCase();
         if ("PUB".equals(segs[0])) {
@@ -71,10 +71,9 @@ class Connection {
             int len = Integer.parseInt(segs[index]);
             byte[] data = new byte[len];
             readPayload(r, data);
-            server.processMessage(subject, reply, data);
+            server.processMessage(this,subject, reply, data);
         } else if ("PING".equals(segs[0])){
-            w.write("PONG\r\n".getBytes());
-            w.flush();
+            sendPong();
         } else if ("SUB".equals(segs[0])) {
             String subject = segs[index++];
             String group = "";
@@ -88,13 +87,20 @@ class Connection {
             removeSubscription(ssid);
         } else if("CONNECT".equals(segs[0])){
             processConnectionOptions(segs[1]);
+        } else {
+            sendError("Unknown Procotol Operation");
         }
+    }
+
+    private synchronized void sendPong() throws IOException {
+        w.write("PONG\r\n".getBytes());
+        w.flush();
     }
 
     private void processConnectionOptions(String json) {
         ConnectionOptions opts = new ConnectionOptions();
         JSON.load(json,opts);
-        verbose = opts.verbose;
+        options = opts;
     }
 
     private void addSubscription(String subject, String group, int ssid) throws IOException {
@@ -119,12 +125,19 @@ class Connection {
     }
 
     private synchronized void sendError(Exception e) throws IOException {
-        w.write(("-ERR "+e.toString()+"\r\n").getBytes());
+        sendError(e.toString());
+    }
+    private synchronized void sendError(String err) throws IOException {
+        w.write(("-ERR '"+err+"'\r\n").getBytes());
         w.flush();
     }
 
     private boolean isVerbose() {
-        return verbose;
+        return options.verbose;
+    }
+
+    public boolean isEcho() {
+        return options.echo;
     }
 
     synchronized void sendMessage(Subscription sub,String subject, byte[] reply, byte[] msg) throws IOException {
@@ -201,5 +214,8 @@ class Connection {
         public String name;
         public int protocol;
         public boolean echo;
+        public String auth_token;
+        public String user;
+        public String pass;
     }
 }

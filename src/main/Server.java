@@ -59,7 +59,7 @@ public class Server {
         return clientIDs.incrementAndGet();
     }
 
-    void processMessage(String subject, String reply, byte[] data) {
+    void processMessage(Connection from,String subject, String reply, byte[] data) {
         byte[] replyb = reply.getBytes();
 
 //        System.out.println("received message on "+subject+", reply "+reply+", "+new String(data));
@@ -68,7 +68,7 @@ public class Server {
 
         SubscriptionMatch cached = _cache.get(subject);
         if (cached != null) {
-            processMessage(cached, subject, replyb, data);
+            processMessage(from,cached, subject, replyb, data);
             return;
         }
 
@@ -104,13 +104,15 @@ public class Server {
 
         cached.groups = groups;
         _cache.put(subject, cached);
-        processMessage(cached, subject, replyb, data);
+        processMessage(from,cached, subject, replyb, data);
     }
 
-    private void processMessage(SubscriptionMatch match, String subject, byte[] replyb, byte[] data) {
+    private void processMessage(Connection from,SubscriptionMatch match, String subject, byte[] replyb, byte[] data) {
         match.lastUsed = System.currentTimeMillis();
         for (Subscription s : match.subs) {
             try {
+                if(s.connection==from && from.isEcho())
+                    continue;
                 s.connection.sendMessage(s, subject, replyb, data);
             } catch (IOException e) {
                 closeConnection(s.connection);
@@ -196,6 +198,9 @@ public class Server {
         public String host = "0.0.0.0";
         public int port = 4222;
         public int max_payload = 1048576;
+        public boolean auth_required;
+        public boolean tls_required;
+        public boolean tls_verify;
         public int client_id = 1;
         private ServerInfo(){}
     }
