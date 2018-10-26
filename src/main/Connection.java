@@ -1,22 +1,29 @@
 package com.robaho.jnatsd;
 
+import com.robaho.jnatsd.util.CharSeq;
 import com.robaho.jnatsd.util.JSON;
 
-import java.io.BufferedInputStream;
-import java.io.BufferedOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
+import javax.net.ssl.SSLSocket;
+import javax.net.ssl.SSLSocketFactory;
+import java.io.*;
 import java.net.Socket;
+import java.util.Arrays;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.TreeMap;
 
 class Connection {
     private BufferedInputStream r;
     private BufferedOutputStream w;
     private final Server server;
-    private final Socket socket;
+    private Socket socket;
     private final String remote;
     private boolean closed;
     private int clientID;
     private ConnectionOptions options;
+    private boolean isSSL;
+    private CharSeq[] args = new CharSeq[4];
+    private byte[] msg = new byte[1024*1024];
 
     public Connection(Server server,Socket s) throws IOException {
         this.socket=s;
@@ -26,11 +33,18 @@ class Connection {
 
         remote = s.getRemoteSocketAddress().toString();
 
-        r = new BufferedInputStream(s.getInputStream());
-        w = new BufferedOutputStream(s.getOutputStream());
+        s.setReceiveBufferSize(1024*1024);
+        s.setSendBufferSize(1024*1024);
+
+        r = new BufferedInputStream(s.getInputStream(),256*1024);
+        w = new BufferedOutputStream(s.getOutputStream(),256*1024);
 
         w.write(server.getInfoAsJSON(this).getBytes());
-        w.flush();
+        flush();
+
+        if(server.isTLSRequired()){
+            upgradeToSSL();
+        }
     }
     void processConnection(){
         Thread processor = new Thread("Processor("+socket.getRemoteSocketAddress()+")"){
@@ -47,81 +61,144 @@ class Connection {
         };
         processor.start();
     }
+
     private void readMessages() throws IOException {
-        for (String line; (line = readLine(r)) != null; ) {
+        char[] buffer = new char[1024];
+
+        for (CharSeq line; (line = readLine(buffer,r)) != null; ) {
             try {
                 processLine(line);
+            } catch(IOException e){
+                throw e;
             } catch(Exception e){
                 sendError(e);
                 e.printStackTrace();
             }
         }
     }
-    private void processLine(String line) throws IOException {
+    private void processLine(CharSeq line) throws IOException {
         int index=1;
 //        System.out.println("rec: " + line);
-        String[] segs = line.split("\\s+");
-        segs[0]=segs[0].toUpperCase();
-        if ("PUB".equals(segs[0])) {
-            String subject = segs[index++];
-            String reply = "";
-            if (segs.length == 4) {
-                reply = segs[index++];
+        int nargs = line.split(args);
+        CharSeq cmd = args[0];
+        if (cmd.equalsIgnoreCase("PUB")) {
+            CharSeq subject = args[index++];
+            CharSeq reply = CharSeq.EMPTY;
+            if (nargs == 4) {
+                reply = args[index++];
             }
-            int len = Integer.parseInt(segs[index]);
-            byte[] data = new byte[len];
-            readPayload(r, data);
-            server.processMessage(this,subject, reply, data);
-        } else if ("PING".equals(segs[0])){
+            int len = args[index].toInt();
+            readPayload(r,len);
+            server.processMessage(this,subject, reply,msg,len);
+        } else if (cmd.equalsIgnoreCase("PING")){
             sendPong();
-        } else if ("SUB".equals(segs[0])) {
-            String subject = segs[index++];
-            String group = "";
-            if(segs.length==4) { // we have a group
-                group = segs[index++];
+        } else if (cmd.equalsIgnoreCase("SUB")) {
+            CharSeq subject = args[index++];
+            CharSeq group = CharSeq.EMPTY;
+            if(nargs==4) { // we have a group
+                group = args[index++];
             }
-            int ssid = Integer.parseInt(segs[index]);
+            int ssid = args[index].toInt();
             addSubscription(subject, group, ssid);
-        } else if("UNSUB".equals(segs[0])){
-            int ssid = Integer.parseInt(segs[1]);
+        } else if(cmd.equalsIgnoreCase("UNSUB")){
+            int ssid = args[1].toInt();
             removeSubscription(ssid);
-        } else if("CONNECT".equals(segs[0])){
-            processConnectionOptions(segs[1]);
+        } else if(cmd.equalsIgnoreCase("CONNECT")){
+            processConnectionOptions(args[1].toString());
         } else {
-            sendError("Unknown Procotol Operation");
+            server.logger.warning("error: "+ line+", "+Arrays.toString(args));
+            sendError("Unknown Protocol Operation");
         }
     }
 
+    private static final byte[] PONG = "PONG\r\n".getBytes();
     private synchronized void sendPong() throws IOException {
-        w.write("PONG\r\n".getBytes());
-        w.flush();
+        w.write(PONG);
+        flush();
     }
 
-    private void processConnectionOptions(String json) {
+    private void processConnectionOptions(String json) throws IOException {
         ConnectionOptions opts = new ConnectionOptions();
         JSON.load(json,opts);
         options = opts;
+
+        if(options.tls_required || server.isTLSRequired()){
+            upgradeToSSL();
+        }
     }
 
-    private void addSubscription(String subject, String group, int ssid) throws IOException {
-        System.out.println("subscribing subject="+subject+",group="+group+",ssid="+ssid);
-        Subscription s = new Subscription(this,ssid,subject,group);
+    private synchronized void upgradeToSSL() throws IOException {
+        if(isSSL)
+            return;
+
+//        System.out.println("upgrading socket to SSL");
+        SSLSocketFactory ssf =
+                (SSLSocketFactory)SSLSocketFactory.getDefault();
+
+//        printCiphers(ssf);
+
+        SSLSocket sslSocket =
+                (SSLSocket)ssf.
+                        createSocket(socket,
+                                socket.getInetAddress().getHostAddress(),
+                                socket.getPort(),
+                                false);
+        sslSocket.setUseClientMode(false);
+        sslSocket.startHandshake();
+        socket = sslSocket;
+
+        isSSL=true;
+
+        r = new BufferedInputStream(socket.getInputStream());
+        w = new BufferedOutputStream(socket.getOutputStream());
+    }
+
+    private void printCiphers(SSLSocketFactory ssf) {
+        String[] defaultCiphers = ssf.getDefaultCipherSuites();
+        String[] availableCiphers = ssf.getSupportedCipherSuites();
+
+        TreeMap ciphers = new TreeMap();
+
+        for(int i=0; i<availableCiphers.length; ++i )
+            ciphers.put(availableCiphers[i], Boolean.FALSE);
+
+        for(int i=0; i<defaultCiphers.length; ++i )
+            ciphers.put(defaultCiphers[i], Boolean.TRUE);
+
+        System.out.println("Default\tCipher");
+        for(Iterator i = ciphers.entrySet().iterator(); i.hasNext(); ) {
+            Map.Entry cipher=(Map.Entry)i.next();
+
+            if(Boolean.TRUE.equals(cipher.getValue()))
+                System.out.print('*');
+            else
+                System.out.print(' ');
+
+            System.out.print('\t');
+            System.out.println(cipher.getKey());
+        }
+    }
+
+    private void addSubscription(CharSeq subject, CharSeq group, int ssid) throws IOException {
+        server.logger.fine("subscribing subject="+subject+",group="+group+",ssid="+ssid);
+        Subscription s = new Subscription(this,ssid,subject.dup(),group.dup());
         server.addSubscription(s);
         if(isVerbose())
             sendOK();
     }
 
     private void removeSubscription(int ssid) throws IOException {
-        System.out.println("un-subscribing ssid = "+ssid);
-        Subscription s = new Subscription(this,ssid,"","");
+        server.logger.fine("un-subscribing ssid = "+ssid);
+        Subscription s = new Subscription(this,ssid,CharSeq.EMPTY,CharSeq.EMPTY);
         server.removeSubscription(s);
         if(isVerbose())
             sendOK();
     }
 
+    private static byte[] OK = "+OK\r\n".getBytes();
     private synchronized void sendOK() throws IOException {
-        w.write("+OK\r\n".getBytes());
-        w.flush();
+        w.write(OK);
+        flush();
     }
 
     private synchronized void sendError(Exception e) throws IOException {
@@ -129,6 +206,13 @@ class Connection {
     }
     private synchronized void sendError(String err) throws IOException {
         w.write(("-ERR '"+err+"'\r\n").getBytes());
+        flush();
+    }
+
+    private synchronized void flush() throws IOException {
+        // TODO, avoid flushing if possible - use heuristics to try and determine that
+        // more messages are probably going to arrive and if so, set a timer in the server
+        // to callback with the flush
         w.flush();
     }
 
@@ -140,27 +224,41 @@ class Connection {
         return options.echo;
     }
 
-    synchronized void sendMessage(Subscription sub,String subject, byte[] reply, byte[] msg) throws IOException {
+    private static byte[] MSG = "MSG ".getBytes();
+    private static byte[] CF_LF = "\r\n".getBytes();
+
+    synchronized void sendMessage(Subscription sub,CharSeq subject, CharSeq reply, byte[] msg, int msglen) throws IOException {
         if(closed)
             return;
 //        System.out.println("sending to "+sub+", subject="+subject);
 
-        w.write("MSG ".getBytes());
-        w.write(subject.getBytes());
-        w.write(" ".getBytes());
-        w.write(Integer.toString(sub.ssid).getBytes());
-        w.write(" ".getBytes());
-        w.write(reply);
-        w.write(" ".getBytes());
-        w.write(Integer.toString(msg.length).getBytes());
-        w.write("\r\n".getBytes());
-        w.write(msg);
-        w.write("\r\n".getBytes());
-        w.flush();
+        w.write(MSG);
+        subject.write(w);
+        w.write(' ');
+        writeInt(w,sub.ssid);
+        w.write(' ');
+        reply.write(w);
+        w.write(' ');
+        writeInt(w,msglen);
+        w.write(CF_LF);
+        w.write(msg,0,msglen);
+        w.write(CF_LF);
+        flush();
     }
 
-    private static String readLine(InputStream r) throws IOException {
-        StringBuilder sb = new StringBuilder();
+    private static byte[] intToBytes = new byte[32];
+    private static void writeInt(OutputStream w,int i) throws IOException {
+        int offset=intToBytes.length-1;
+        do {
+            char c = (char) (i%10+'0');
+            intToBytes[offset--]=(byte)c;
+            i/=10;
+        } while(i>0);
+        w.write(intToBytes,offset+1,intToBytes.length-1-offset);
+    }
+
+    private CharSeq readLine(char[] buffer,InputStream r) throws IOException {
+        int len=0;
         for (int c = r.read(); ; c = r.read()) {
             if (c == -1)
                 throw new IOException("end of file");
@@ -168,16 +266,16 @@ class Connection {
                 continue;
             if (c == '\n')
                 break;
-            sb.append((char) c);
+            buffer[len++]=(char)c;
         }
-        return sb.toString();
+
+        return new CharSeq(buffer,0,len);
     }
 
-    private static void readPayload(InputStream r, byte[] b) throws IOException {
-        int len = b.length;
+    private void readPayload(InputStream r,int len) throws IOException {
         int offset = 0;
         while (len > 0) {
-            int read = r.read(b, offset, len);
+            int read = r.read(msg, offset, len);
             offset += read;
             len -= read;
         }
@@ -218,4 +316,5 @@ class Connection {
         public String user;
         public String pass;
     }
+
 }

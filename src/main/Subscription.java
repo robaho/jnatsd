@@ -1,5 +1,7 @@
 package com.robaho.jnatsd;
 
+import com.robaho.jnatsd.util.CharSeq;
+
 import java.util.regex.Pattern;
 
 /**
@@ -7,20 +9,23 @@ import java.util.regex.Pattern;
  */
 class Subscription implements Comparable<Subscription> {
     Connection connection;
-    String subject;
-    String group;
+    CharSeq subject;
+    CharSeq group;
     int ssid;
 
     private String[] segments;
 
     private static Pattern dot = Pattern.compile("\\.");
 
-    public Subscription(Connection connection,int ssid,String subject, String group) {
+    public Subscription(Connection connection, int ssid, CharSeq subject, CharSeq group) {
         this.connection=connection;
         this.ssid=ssid;
         this.subject = subject;
         this.group=group;
         segments = dot.split(subject);
+    }
+    public Subscription(Connection connection, int ssid, String subject, String group) {
+        this(connection,ssid,new CharSeq(subject.toCharArray()),new CharSeq(group.toCharArray()));
     }
 
     public String toString() {
