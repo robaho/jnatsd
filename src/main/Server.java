@@ -126,13 +126,16 @@ public class Server {
     private void processMessage(Connection from,SubscriptionMatch match, CharSeq subject, CharSeq reply, byte[] data, int datalen) {
         match.lastUsed = System.currentTimeMillis();
 
-        data = Arrays.copyOf(data,datalen);
-        subject = subject.dup();
-        reply = reply.dup();
+        byte[] data2 = null;
 
         for (Subscription s : match.subs) {
             if(s.connection==from && from.isEcho())
                 continue;
+            if(data2==null) {
+                data2 = Arrays.copyOf(data,datalen);
+                subject = subject.dup();
+                reply = reply.dup();
+            }
             s.connection.sendMessage(s, subject, reply, data);
         }
 
@@ -142,6 +145,11 @@ public class Server {
         for (Map.Entry<CharSeq, List<Subscription>> group : match.groups.entrySet()) {
             List<Subscription> subs = group.getValue();
             Subscription gs = subs.get((int) System.currentTimeMillis() % subs.size());
+            if(data2==null) {
+                data2 = Arrays.copyOf(data,datalen);
+                subject = subject.dup();
+                reply = reply.dup();
+            }
             gs.connection.sendMessage(gs, subject, reply, data);
         }
     }
@@ -167,6 +175,7 @@ public class Server {
             subs = copy.toArray(new Subscription[copy.size()]);
             cache = new ConcurrentHashMap<>();
         }
+        connection.close();
         logger.info("connection terminated " + connection.getRemote());
     }
 

@@ -2,6 +2,7 @@ package com.robaho.jnatsd.util;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.util.Arrays;
 
 public class CharSeq implements CharSequence {
     public static final CharSeq EMPTY = new CharSeq();
@@ -95,8 +96,7 @@ public class CharSeq implements CharSequence {
     public CharSeq dup() {
         if(this==EMPTY)
             return EMPTY;
-        char[] array2 = new char[len];
-        System.arraycopy(array,offset,array2,0,len);
+        char[] array2 = Arrays.copyOfRange(array,offset,offset+len);
         return new CharSeq(array2,0,len,hashCode);
     }
 
