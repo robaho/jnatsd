@@ -32,6 +32,7 @@ public class Server {
 
     private static class SubscriptionMatch {
         long lastUsed; // for LRU cache purge
+        CharSeq subject;
         Subscription[] subs;
         Map<CharSeq, List<Subscription>> groups = new HashMap<>();
     }
@@ -76,7 +77,15 @@ public class Server {
             return;
         }
 
-        cached = new SubscriptionMatch();
+        cached = buildSubscriptionMatch(subject);
+        _cache.put(cached.subject,cached);
+        processMessage(from,cached, subject, reply, data, datalen);
+    }
+
+    private SubscriptionMatch buildSubscriptionMatch(CharSeq subject) {
+        SubscriptionMatch match = new SubscriptionMatch();
+
+        match.subject = subject.dup();
 
         Map<CharSeq, List<Subscription>> groups = new HashMap<>();
 
@@ -89,7 +98,7 @@ public class Server {
         // TODO maybe store all connections for the same 'subscription' in a list by subscription
         // to reduce the search comparisons, gets more complex with groups though
 
-        Subscription s = new Subscription(null, 0, subject.dup(), CharSeq.EMPTY);
+        Subscription s = new Subscription(null, 0, match.subject, CharSeq.EMPTY);
         for (int i = 0; i < _subs.length; i++) {
             Subscription sub = _subs[i];
             if (!sub.matches(s)) {
@@ -108,22 +117,23 @@ public class Server {
             }
         }
 
-        cached.groups = groups;
-        cached.subs = set.toArray(new Subscription[set.size()]);
-        _cache.put(subject.dup(), cached);
-        processMessage(from,cached, subject, reply, data, datalen);
+        match.groups = groups;
+        match.subs = set.toArray(new Subscription[set.size()]);
+
+        return match;
     }
 
     private void processMessage(Connection from,SubscriptionMatch match, CharSeq subject, CharSeq reply, byte[] data, int datalen) {
         match.lastUsed = System.currentTimeMillis();
+
+        data = Arrays.copyOf(data,datalen);
+        subject = subject.dup();
+        reply = reply.dup();
+
         for (Subscription s : match.subs) {
-            try {
-                if(s.connection==from && from.isEcho())
-                    continue;
-                s.connection.sendMessage(s, subject, reply, data, datalen);
-            } catch (IOException e) {
-                closeConnection(s.connection);
-            }
+            if(s.connection==from && from.isEcho())
+                continue;
+            s.connection.sendMessage(s, subject, reply, data);
         }
 
         if(match.groups.isEmpty())
@@ -132,11 +142,7 @@ public class Server {
         for (Map.Entry<CharSeq, List<Subscription>> group : match.groups.entrySet()) {
             List<Subscription> subs = group.getValue();
             Subscription gs = subs.get((int) System.currentTimeMillis() % subs.size());
-            try {
-                gs.connection.sendMessage(gs, subject, reply, data, datalen);
-            } catch (IOException e) {
-                closeConnection(gs.connection);
-            }
+            gs.connection.sendMessage(gs, subject, reply, data);
         }
     }
 

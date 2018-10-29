@@ -11,6 +11,9 @@ import java.util.Arrays;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.locks.LockSupport;
+import java.util.logging.Level;
 
 class Connection {
     private BufferedInputStream r;
@@ -24,6 +27,8 @@ class Connection {
     private boolean isSSL;
     private CharSeq[] args = new CharSeq[4];
     private byte[] msg = new byte[1024*1024];
+    private final ConcurrentLinkedQueue<Message> queue = new ConcurrentLinkedQueue<>();
+    private Thread writer;
 
     public Connection(Server server,Socket s) throws IOException {
         this.socket=s;
@@ -60,6 +65,25 @@ class Connection {
             }
         };
         processor.start();
+
+        writer = new Thread("Writer("+socket.getRemoteSocketAddress()+")"){
+            public void run() {
+                while(!isInterrupted()) {
+                    try {
+                        Message m=null;
+                        while((m=queue.poll())!=null){
+                            writeMessage(m);
+                        }
+                        flush();
+                    } catch (IOException e) {
+                        server.closeConnection(Connection.this);
+                        break;
+                    }
+                    LockSupport.park();
+                }
+            }
+        };
+        writer.start();
     }
 
     private void readMessages() throws IOException {
@@ -72,7 +96,7 @@ class Connection {
                 throw e;
             } catch(Exception e){
                 sendError(e);
-                e.printStackTrace();
+                server.logger.log(Level.WARNING,"error processing connection",e);
             }
         }
     }
@@ -227,23 +251,41 @@ class Connection {
     private static byte[] MSG = "MSG ".getBytes();
     private static byte[] CF_LF = "\r\n".getBytes();
 
-    synchronized void sendMessage(Subscription sub,CharSeq subject, CharSeq reply, byte[] msg, int msglen) throws IOException {
-        if(closed)
-            return;
-//        System.out.println("sending to "+sub+", subject="+subject);
+    private static class Message {
+        final Subscription sub;
+        final byte[] data;
+        final CharSeq subject;
+        final CharSeq reply;
 
+        public Message(Subscription sub, CharSeq subject, CharSeq reply, byte[] data) {
+            this.sub=sub;
+            this.subject=subject;
+            this.reply=reply;
+            this.data=data;
+        }
+    }
+
+    void sendMessage(Subscription sub,CharSeq subject, CharSeq reply, byte[] data)  {
+        if (closed)
+            return;
+
+        queue.add(new Message(sub, subject, reply, data));
+        LockSupport.unpark(writer);
+    }
+
+    private synchronized void writeMessage(Message msg) throws IOException {
+//        System.out.println("sending to "+sub+", subject="+subject);
         w.write(MSG);
-        subject.write(w);
+        msg.subject.write(w);
         w.write(' ');
-        writeInt(w,sub.ssid);
+        writeInt(w,msg.sub.ssid);
         w.write(' ');
-        reply.write(w);
+        msg.reply.write(w);
         w.write(' ');
-        writeInt(w,msglen);
+        writeInt(w,msg.data.length);
         w.write(CF_LF);
-        w.write(msg,0,msglen);
+        w.write(msg.data);
         w.write(CF_LF);
-        flush();
     }
 
     private static byte[] intToBytes = new byte[32];
@@ -289,6 +331,7 @@ class Connection {
         } catch (IOException e) {
             e.printStackTrace();
         } finally {
+            writer.interrupt();
             closed=true;
         }
     }
