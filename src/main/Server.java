@@ -9,6 +9,7 @@ import java.net.Socket;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 public class Server {
@@ -53,7 +54,7 @@ public class Server {
                             c.processConnection();
                         }
                     } catch (IOException e) {
-                        e.printStackTrace();
+                        logger.log(Level.FINE,"acceptor failed",e);
                     }
                 }
 
@@ -126,14 +127,17 @@ public class Server {
     private void processMessage(Connection from,SubscriptionMatch match, CharSeq subject, CharSeq reply, byte[] data, int datalen) {
         match.lastUsed = System.currentTimeMillis();
 
-        data = Arrays.copyOf(data,datalen);
-        subject = subject.dup();
-        reply = reply.dup();
+        byte[] copy = null;
 
         for (Subscription s : match.subs) {
             if(s.connection==from && from.isEcho())
                 continue;
-            s.connection.sendMessage(s, subject, reply, data);
+            if(copy==null) {
+                copy = Arrays.copyOf(data,datalen);
+                subject = subject.dup();
+                reply = reply.dup();
+            }
+            s.connection.sendMessage(s, subject, reply, copy);
         }
 
         if(match.groups.isEmpty())
@@ -142,7 +146,12 @@ public class Server {
         for (Map.Entry<CharSeq, List<Subscription>> group : match.groups.entrySet()) {
             List<Subscription> subs = group.getValue();
             Subscription gs = subs.get((int) System.currentTimeMillis() % subs.size());
-            gs.connection.sendMessage(gs, subject, reply, data);
+            if(copy==null) {
+                copy = Arrays.copyOf(data,datalen);
+                subject = subject.dup();
+                reply = reply.dup();
+            }
+            gs.connection.sendMessage(gs, subject, reply, copy);
         }
     }
 
@@ -167,6 +176,7 @@ public class Server {
             subs = copy.toArray(new Subscription[copy.size()]);
             cache = new ConcurrentHashMap<>();
         }
+        connection.close();
         logger.info("connection terminated " + connection.getRemote());
     }
 

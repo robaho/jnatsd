@@ -21,9 +21,9 @@ class Connection {
     private final Server server;
     private Socket socket;
     private final String remote;
-    private boolean closed;
+    private volatile boolean closed;
     private int clientID;
-    private ConnectionOptions options;
+    private ConnectionOptions options = new ConnectionOptions();
     private boolean isSSL;
     private CharSeq[] args = new CharSeq[4];
     private byte[] msg = new byte[1024*1024];
@@ -68,18 +68,25 @@ class Connection {
 
         writer = new Thread("Writer("+socket.getRemoteSocketAddress()+")"){
             public void run() {
-                while(!isInterrupted()) {
+                while(!closed) {
+                    int count=0;
                     try {
                         Message m=null;
                         while((m=queue.poll())!=null){
                             writeMessage(m);
+                            count++;
                         }
-                        flush();
+                        if(count>1) {
+                            LockSupport.parkNanos(500*1000);
+                        }
+                        if(queue.isEmpty()){
+                            flush();
+                            LockSupport.park();
+                        }
                     } catch (IOException e) {
                         server.closeConnection(Connection.this);
                         break;
                     }
-                    LockSupport.park();
                 }
             }
         };
@@ -332,6 +339,7 @@ class Connection {
             e.printStackTrace();
         } finally {
             writer.interrupt();
+            LockSupport.unpark(writer);
             closed=true;
         }
     }
