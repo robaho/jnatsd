@@ -4,21 +4,25 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.util.Arrays;
 
-public class CharSeq implements CharSequence {
+public final class CharSeq implements CharSequence {
     public static final CharSeq EMPTY = new CharSeq();
-    private final char[] array;
+    private final byte[] array;
     private final int offset;
     private final int len;
     private int hashCode;
 
-    public CharSeq(char[] array, int offset, int len, int hashCode) {
+    public CharSeq(String s) {
+        this(s.getBytes());
+    }
+
+    public CharSeq(byte[] array, int offset, int len, int hashCode) {
         this.array = array;
         this.offset = offset;
         this.len = len;
         this.hashCode = hashCode;
     }
 
-    public CharSeq(char[] array, int offset, int len) {
+    public CharSeq(byte[] array, int offset, int len) {
         this.array = array;
         this.offset = offset;
         this.len = len;
@@ -36,7 +40,7 @@ public class CharSeq implements CharSequence {
         hashCode=0;
     }
 
-    public CharSeq(char[] array) {
+    public CharSeq(byte[] array) {
         this(array,0,array.length);
     }
 
@@ -47,7 +51,7 @@ public class CharSeq implements CharSequence {
 
     @Override
     public char charAt(int index) {
-        return array[offset+index];
+        return (char)(array[offset+index] &0xFF);
     }
 
     @Override
@@ -61,29 +65,40 @@ public class CharSeq implements CharSequence {
         return new String(array,offset,len);
     }
 
-    public boolean equalsIgnoreCase(CharSequence s) {
+    public boolean equalsIgnoreCase(CharSeq s) {
         if(len!=s.length())
             return false;
+        int off = offset;
+        int off0 = s.offset;
+        byte[] array0 = s.array;
+
         for(int i=0;i<len;i++){
-            char c = array[i];
-            char c0 = s.charAt(i);
-            if(c!=c0 && Character.toUpperCase(c)!=c0)
+            byte c = array[off++];
+            byte c0 = array0[off0++];
+            if(c!=c0 && toUpperCase(c)!=c0)
                 return false;
         }
         return true;
     }
 
+    private static byte toUpperCase(byte c) {
+        if(c>='a' && c<='z') {
+            return (byte)('A'+(c-'a'));
+        }
+        return c;
+    }
+
     public boolean equals(Object o) {
         if(!(o instanceof CharSeq))
             return false;
-        CharSeq s2 = (CharSeq) o;
-        if(len!=s2.len || hashCode!=s2.hashCode)
+        CharSeq s0 = (CharSeq) o;
+        if(len!=s0.len || hashCode!=s0.hashCode)
             return false;
-        char[] array2 = s2.array;
+        byte[] array0 = s0.array;
         int off = offset;
-        int off2 = s2.offset;
+        int off0 = s0.offset;
         for(int i=0;i<len;i++){
-            if(array[off++]!=array2[off2++])
+            if(array[off++]!=array0[off0++])
                 return false;
         }
         return true;
@@ -96,14 +111,14 @@ public class CharSeq implements CharSequence {
     public CharSeq dup() {
         if(this==EMPTY)
             return EMPTY;
-        char[] array2 = Arrays.copyOfRange(array,offset,offset+len);
+        byte[] array2 = Arrays.copyOfRange(array,offset,offset+len);
         return new CharSeq(array2,0,len,hashCode);
     }
 
     public int toInt() {
         int v = 0;
         for(int i=0;i<len;i++){
-            v = v * 10 + array[i+offset]-'0';
+            v = v * 10 + charAt(i)-'0';
         }
         return v;
 
@@ -114,7 +129,7 @@ public class CharSeq implements CharSequence {
         int start=0;
         int hash=0;
         for(int i=0;i<len;i++) {
-            char c = array[i];
+            byte c = array[i];
             if(c==' '){
                 segs[n++]=new CharSeq(array,start,i-start,hash);
                 while(i<len && c==' '){
@@ -133,8 +148,8 @@ public class CharSeq implements CharSequence {
     }
 
     public void write(OutputStream os) throws IOException {
-        for(int i=0;i<len;i++){
-            os.write(array[i+offset] & 0xFF);
-        }
+        if(len==0)
+            return;
+        os.write(array,offset,len);
     }
 }

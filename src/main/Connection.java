@@ -77,13 +77,15 @@ class Connection {
                             writeMessage(m);
                             count++;
                         }
-                        if(count>1) {
-                            LockSupport.parkNanos(1000*1000*10);
-                        }
-                        if(queue.isEmpty()){
-                            flush();
-                            LockSupport.park();
-                        }
+//                        if(count>1) {
+//                            LockSupport.parkNanos(1000*1000*10);
+//                        }
+//                        if(queue.isEmpty()){
+//                            flush();
+//                            LockSupport.park();
+//                        }
+                        flush();
+                        LockSupport.park();
                     } catch (IOException e) {
                         server.closeConnection(Connection.this);
                         break;
@@ -95,7 +97,7 @@ class Connection {
     }
 
     private void readMessages() throws IOException {
-        char[] buffer = new char[1024];
+        byte[] buffer = new byte[1024];
 
         for (CharSeq line; (line = readLine(buffer,r)) != null; ) {
             try {
@@ -108,12 +110,18 @@ class Connection {
             }
         }
     }
+    private static final CharSeq PUB = new CharSeq("PUB");
+    private static final CharSeq PING = new CharSeq("PING");
+    private static final CharSeq SUB = new CharSeq("SUB");
+    private static final CharSeq UNSUB = new CharSeq("UNSUB");
+    private static final CharSeq CONNECT = new CharSeq("CONNECT");
+
     private void processLine(CharSeq line) throws IOException {
         int index=1;
 //        System.out.println("rec: " + line);
         int nargs = line.split(args);
         CharSeq cmd = args[0];
-        if (cmd.equalsIgnoreCase("PUB")) {
+        if (cmd.equalsIgnoreCase(PUB)) {
             CharSeq subject = args[index++];
             CharSeq reply = CharSeq.EMPTY;
             if (nargs == 4) {
@@ -122,9 +130,9 @@ class Connection {
             int len = args[index].toInt();
             readPayload(r,len);
             server.processMessage(this,subject, reply,msg,len);
-        } else if (cmd.equalsIgnoreCase("PING")){
+        } else if (cmd.equalsIgnoreCase(PING)){
             sendPong();
-        } else if (cmd.equalsIgnoreCase("SUB")) {
+        } else if (cmd.equalsIgnoreCase(SUB)) {
             CharSeq subject = args[index++];
             CharSeq group = CharSeq.EMPTY;
             if(nargs==4) { // we have a group
@@ -132,10 +140,10 @@ class Connection {
             }
             int ssid = args[index].toInt();
             addSubscription(subject, group, ssid);
-        } else if(cmd.equalsIgnoreCase("UNSUB")){
+        } else if(cmd.equalsIgnoreCase(UNSUB)){
             int ssid = args[1].toInt();
             removeSubscription(ssid);
-        } else if(cmd.equalsIgnoreCase("CONNECT")){
+        } else if(cmd.equalsIgnoreCase(CONNECT)){
             processConnectionOptions(args[1].toString());
         } else {
             server.logger.warning("error: "+ line+", "+Arrays.toString(args));
@@ -307,7 +315,7 @@ class Connection {
         w.write(intToBytes,offset+1,intToBytes.length-1-offset);
     }
 
-    private CharSeq readLine(char[] buffer,InputStream r) throws IOException {
+    private CharSeq readLine(byte[] buffer,InputStream r) throws IOException {
         int len=0;
         for (int c = r.read(); ; c = r.read()) {
             if (c == -1)
@@ -316,7 +324,7 @@ class Connection {
                 continue;
             if (c == '\n')
                 break;
-            buffer[len++]=(char)c;
+            buffer[len++]=(byte)c;
         }
 
         return new CharSeq(buffer,0,len);

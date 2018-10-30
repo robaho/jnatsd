@@ -25,7 +25,7 @@ class Subscription implements Comparable<Subscription> {
         segments = dot.split(subject);
     }
     public Subscription(Connection connection, int ssid, String subject, String group) {
-        this(connection,ssid,new CharSeq(subject.toCharArray()),new CharSeq(group.toCharArray()));
+        this(connection,ssid,new CharSeq(subject.getBytes()),new CharSeq(group.getBytes()));
     }
 
     public String toString() {

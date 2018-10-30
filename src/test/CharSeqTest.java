@@ -9,9 +9,9 @@ import static junit.framework.TestCase.assertFalse;
 public class CharSeqTest {
     @Test
     public void testCharSeq() {
-        CharSeq c1 = new CharSeq("hello".toCharArray());
-        CharSeq c2 = new CharSeq("hello".toCharArray());
-        CharSeq c3 = new CharSeq("bye".toCharArray());
+        CharSeq c1 = new CharSeq("hello");
+        CharSeq c2 = new CharSeq("hello");
+        CharSeq c3 = new CharSeq("bye");
 
         assertEquals(c1,c1);
         assertEquals(c1,c2);
@@ -19,9 +19,9 @@ public class CharSeqTest {
 
         CharSeq[] a = new CharSeq[2];
 
-        CharSeq seq = new CharSeq("This is".toCharArray());
+        CharSeq seq = new CharSeq("This is");
         seq.split(a);
-        assertEquals(a[0],new CharSeq("This".toCharArray()));
-        assertEquals(a[1],new CharSeq("is".toCharArray()));
+        assertEquals(a[0],new CharSeq("This"));
+        assertEquals(a[1],new CharSeq("is"));
     }
 }
