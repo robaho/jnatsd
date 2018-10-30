@@ -1,8 +1,6 @@
 package com.robaho.jnatsd;
 
-import com.robaho.jnatsd.util.CharSeq;
-import com.robaho.jnatsd.util.JSON;
-import com.robaho.jnatsd.util.UnsyncBufferedOutputStream;
+import com.robaho.jnatsd.util.*;
 
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
@@ -28,7 +26,7 @@ class Connection {
     private boolean isSSL;
     private CharSeq[] args = new CharSeq[4];
     private byte[] msg = new byte[1024*1024];
-    private final ConcurrentLinkedQueue<Message> queue = new ConcurrentLinkedQueue<>();
+    private final RingBuffer<Message> queue = new RingBuffer(8192);
     private Thread writer;
 
     public Connection(Server server,Socket s) throws IOException {
@@ -42,7 +40,7 @@ class Connection {
         s.setReceiveBufferSize(1024*1024);
         s.setSendBufferSize(1024*1024);
 
-        r = new BufferedInputStream(s.getInputStream(),256*1024);
+        r = new UnsyncBufferedInputStream(s.getInputStream(),256*1024);
         w = new UnsyncBufferedOutputStream(s.getOutputStream(),256*1024);
 
         w.write(server.getInfoAsJSON(this).getBytes());
@@ -285,7 +283,8 @@ class Connection {
         if (closed)
             return;
 
-        queue.add(new Message(sub, subject, reply, data));
+        Message m = new Message(sub,subject,reply,data);
+        while(!queue.offer(m));
         LockSupport.unpark(writer);
     }
 
