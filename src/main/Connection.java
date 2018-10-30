@@ -77,15 +77,15 @@ class Connection {
                             writeMessage(m);
                             count++;
                         }
-//                        if(count>1) {
-//                            LockSupport.parkNanos(1000*1000*10);
-//                        }
-//                        if(queue.isEmpty()){
-//                            flush();
-//                            LockSupport.park();
-//                        }
-                        flush();
-                        LockSupport.park();
+                        if(count>1) {
+                            LockSupport.parkNanos(1000*1000*10);
+                        }
+                        if(queue.isEmpty()){
+                            flush();
+                            LockSupport.park();
+                        }
+//                        flush();
+//                        LockSupport.park();
                     } catch (IOException e) {
                         server.closeConnection(Connection.this);
                         break;
