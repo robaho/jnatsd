@@ -2,6 +2,7 @@ package com.robaho.jnatsd;
 
 import com.robaho.jnatsd.util.CharSeq;
 import com.robaho.jnatsd.util.JSON;
+import com.robaho.jnatsd.util.UnsyncBufferedOutputStream;
 
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
@@ -16,8 +17,8 @@ import java.util.concurrent.locks.LockSupport;
 import java.util.logging.Level;
 
 class Connection {
-    private BufferedInputStream r;
-    private BufferedOutputStream w;
+    private InputStream r;
+    private OutputStream w;
     private final Server server;
     private Socket socket;
     private final String remote;
@@ -42,7 +43,7 @@ class Connection {
         s.setSendBufferSize(1024*1024);
 
         r = new BufferedInputStream(s.getInputStream(),256*1024);
-        w = new BufferedOutputStream(s.getOutputStream(),256*1024);
+        w = new UnsyncBufferedOutputStream(s.getOutputStream(),256*1024);
 
         w.write(server.getInfoAsJSON(this).getBytes());
         flush();
@@ -77,7 +78,7 @@ class Connection {
                             count++;
                         }
                         if(count>1) {
-                            LockSupport.parkNanos(500*1000);
+                            LockSupport.parkNanos(1000*1000*10);
                         }
                         if(queue.isEmpty()){
                             flush();
