@@ -4,13 +4,17 @@ Java port of nats-io server gnatsd. See [nats-io gnatsd](github.com/nats-io/gnat
 
 The original is written is Go.
 
+**Recent Changes**
+
+TLS connections are now fully supported.
+
+Most simple options, like 'verbose' work. 
+
 **ToDo**
 
 Need to support "router mode".
 
-Add TLS connections.
-
-Need to implement server and client options.
+Need to support authorization using client certificates.
 
 Use binary search for matching subscriptions.
 
