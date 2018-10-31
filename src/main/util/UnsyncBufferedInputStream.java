@@ -274,19 +274,7 @@ class UnsyncBufferedInputStream extends FilterInputStream {
             return 0;
         }
 
-        int n = 0;
-        for (;;) {
-            int nread = read1(b, off + n, len - n);
-            if (nread <= 0)
-                return (n == 0) ? nread : n;
-            n += nread;
-            if (n >= len)
-                return n;
-            // if not closed but no bytes available, return
-            InputStream input = in;
-            if (input != null && input.available() <= 0)
-                return n;
-        }
+        return read1(b, off, len);
     }
 
     /**

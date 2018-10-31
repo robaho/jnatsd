@@ -10,7 +10,6 @@ import java.util.Arrays;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.TreeMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.locks.LockSupport;
 import java.util.logging.Level;
 
@@ -37,11 +36,13 @@ class Connection {
 
         remote = s.getRemoteSocketAddress().toString();
 
+        socket.setTcpNoDelay(true);
+
         s.setReceiveBufferSize(1024*1024);
         s.setSendBufferSize(1024*1024);
 
-        r = new UnsyncBufferedInputStream(s.getInputStream(),256*1024);
-        w = new UnsyncBufferedOutputStream(s.getOutputStream(),256*1024);
+        r = new UnsyncBufferedInputStream(s.getInputStream(),64*1024);
+        w = new UnsyncBufferedOutputStream(s.getOutputStream(),64*1024);
 
         w.write(server.getInfoAsJSON(this).getBytes());
         flush();
