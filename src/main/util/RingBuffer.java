@@ -6,7 +6,7 @@ package com.robaho.jnatsd.util;
  * @param <T>
  */
 public class RingBuffer<T> {
-    private T[] ring;
+    private final T[] ring;
     private volatile int head;
     private volatile int tail;
 

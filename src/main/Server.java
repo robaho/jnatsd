@@ -2,21 +2,26 @@ package com.robaho.jnatsd;
 
 import com.robaho.jnatsd.util.CharSeq;
 import com.robaho.jnatsd.util.JSON;
+import com.robaho.jnatsd.util.RingBuffer;
 
 import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.LockSupport;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 public class Server {
     private int port;
-    private Thread listener, io;
+    private Thread listener, handler;
     private Set<Connection> connections = Collections.newSetFromMap(new ConcurrentHashMap<>());
     Logger logger = Logger.getLogger("server");
+
+    private int maxMsgSize = 1024*1024;
 
     public Server(int port) {
         this.port = port;
@@ -26,9 +31,17 @@ public class Server {
     private volatile Map<CharSeq, SubscriptionMatch> cache = new ConcurrentHashMap();
     private AtomicInteger clientIDs = new AtomicInteger(0);
     private boolean tlsRequired;
+    private final RingBuffer<InMessage> queue = new RingBuffer<>(64*1024);
+    private volatile boolean done;
+
+    static final long spinForTimeoutThreshold = 1000L;
 
     public boolean isTLSRequired() {
         return tlsRequired;
+    }
+
+    public int getMaxMsgSize() {
+        return maxMsgSize;
     }
 
     private static class SubscriptionMatch {
@@ -38,12 +51,14 @@ public class Server {
         Map<CharSeq, List<Subscription>> groups = new HashMap<>();
     }
 
+    private final AtomicBoolean handlerSync = new AtomicBoolean();
+
     public void start() throws IOException {
         ServerSocket socket = new ServerSocket(port);
 
         listener = new Thread("Listener") {
             public void run() {
-                while (listener != null) {
+                while (!done) {
                     try {
                         Socket s = socket.accept();
 
@@ -61,32 +76,65 @@ public class Server {
             }
         };
         listener.start();
+
+        handler = new Thread(new QueueHandler(),"QueueHandler");
+        handler.start();
+    }
+
+    private class QueueHandler implements Runnable {
+        long handled=0;
+        public void run() {
+            InMessage m;
+            while (!done) {
+                long deadline = 0;
+                while((m=queue.poll())==null){
+                    if(deadline==0)
+                        deadline=System.nanoTime()+spinForTimeoutThreshold;
+                    if(System.nanoTime()>deadline) {
+                        if(handlerSync.compareAndSet(true,false))
+                            continue;
+                        LockSupport.park();
+                    }
+                }
+                handled++;
+                handleMessage(m);
+            }
+        }
     }
 
     public int getNextClientID() {
         return clientIDs.incrementAndGet();
     }
 
-    void processMessage(Connection from, CharSeq subject, CharSeq reply, byte[] data, int datalen) {
+    void queueMessage(InMessage m){
+        while(!queue.offer(m));
+        if(handlerSync.compareAndSet(false,true)) {
+            LockSupport.unpark(handler);
+        }
+    }
+
+    private void handleMessage(InMessage m) {
 //        System.out.println("received message on "+subject+", reply "+reply+", "+new String(data));
 
         Map<CharSeq, SubscriptionMatch> _cache = cache;
 
-        SubscriptionMatch cached = _cache.get(subject);
+        SubscriptionMatch cached = _cache.get(m.subject);
         if (cached != null) {
-            processMessage(from,cached, subject, reply, data, datalen);
+            processMessage(m.connection,cached, m.subject, m.reply, m.data);
             return;
         }
 
-        cached = buildSubscriptionMatch(subject);
-        _cache.put(cached.subject,cached);
-        processMessage(from,cached, subject, reply, data, datalen);
+        cached = buildSubscriptionMatch(m.subject);
+        SubscriptionMatch old = _cache.putIfAbsent(cached.subject,cached);
+        if(old!=null)
+            cached=old;
+        processMessage(m.connection,cached,m.subject, m.reply, m.data);
     }
 
     private SubscriptionMatch buildSubscriptionMatch(CharSeq subject) {
         SubscriptionMatch match = new SubscriptionMatch();
 
-        match.subject = subject.dup();
+        match.subject = subject;
 
         Map<CharSeq, List<Subscription>> groups = new HashMap<>();
 
@@ -109,7 +157,7 @@ public class Server {
                 List<Subscription> gsubs = groups.get(sub.group);
                 if (gsubs == null) {
                     gsubs = new ArrayList<>();
-                    groups.put(sub.group.dup(), gsubs);
+                    groups.put(sub.group, gsubs);
                 }
                 gsubs.add(sub);
                 continue;
@@ -124,20 +172,13 @@ public class Server {
         return match;
     }
 
-    private void processMessage(Connection from,SubscriptionMatch match, CharSeq subject, CharSeq reply, byte[] data, int datalen) {
+    private void processMessage(Connection from,SubscriptionMatch match, CharSeq subject, CharSeq reply, byte[] data) {
         match.lastUsed = System.currentTimeMillis();
-
-        byte[] copy = null;
 
         for (Subscription s : match.subs) {
             if(s.connection==from && from.isEcho())
                 continue;
-            if(copy==null) {
-                copy = Arrays.copyOf(data,datalen);
-                subject = subject.dup();
-                reply = reply.dup();
-            }
-            s.connection.sendMessage(s, subject, reply, copy);
+            s.connection.sendMessage(s, subject, reply, data);
         }
 
         if(match.groups.isEmpty())
@@ -146,18 +187,17 @@ public class Server {
         for (Map.Entry<CharSeq, List<Subscription>> group : match.groups.entrySet()) {
             List<Subscription> subs = group.getValue();
             Subscription gs = subs.get((int) System.currentTimeMillis() % subs.size());
-            if(copy==null) {
-                copy = Arrays.copyOf(data,datalen);
-                subject = subject.dup();
-                reply = reply.dup();
-            }
-            gs.connection.sendMessage(gs, subject, reply, copy);
+            gs.connection.sendMessage(gs, subject, reply, data);
         }
     }
 
     public void stop() throws InterruptedException {
+        done=true;
+
         listener.interrupt();
         listener.join();
+        handler.interrupt();
+        handler.join();
     }
 
     public void waitTillDone() throws InterruptedException {
@@ -187,27 +227,34 @@ public class Server {
         return "INFO " + JSON.save(info) +"\r\n";
     }
 
-    public void addSubscription(Subscription s) {
+    public void addSubscription(Subscription toAdd) {
+
         synchronized (connections) {
-            Subscription[] copy = new Subscription[subs.length + 1];
-            System.arraycopy(subs, 0, copy, 0, subs.length);
-            copy[subs.length] = s;
-            Arrays.sort(copy);
-            subs = copy;
+            ArrayList<Subscription> copy = new ArrayList<>();
+            for (Subscription s : subs) {
+                if (s.connection == toAdd.connection && s.ssid == toAdd.ssid) {
+                    continue;
+                } else {
+                    copy.add(s);
+                }
+            }
+            copy.add(toAdd);
+            subs = copy.toArray(new Subscription[copy.size()]);
             cache = new ConcurrentHashMap<>();
         }
     }
 
-    public void removeSubscription(Subscription s) {
+    public void removeSubscription(Subscription toRemove) {
         synchronized (connections) {
-            Subscription[] copy = new Subscription[subs.length - 1];
-            int dstI = 0;
-            for (int i = 0; i < subs.length; i++) {
-                if (s.connection == subs[i].connection && s.ssid == subs[i].ssid)
+            ArrayList<Subscription> copy = new ArrayList<>();
+            for (Subscription s : subs) {
+                if (s.connection == toRemove.connection && s.ssid == toRemove.ssid) {
                     continue;
-                copy[dstI++] = subs[i];
+                } else {
+                    copy.add(s);
+                }
             }
-            subs = copy;
+            subs = copy.toArray(new Subscription[copy.size()]);
             cache = new ConcurrentHashMap<>();
         }
     }

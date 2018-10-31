@@ -10,6 +10,7 @@ import java.util.Arrays;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.LockSupport;
 import java.util.logging.Level;
 
@@ -24,22 +25,23 @@ class Connection {
     private ConnectionOptions options = new ConnectionOptions();
     private boolean isSSL;
     private CharSeq[] args = new CharSeq[4];
-    private byte[] msg = new byte[1024*1024];
-    private final RingBuffer<Message> queue = new RingBuffer(8192);
+    private final byte[] msg;
+    private final RingBuffer<OutMessage> queue = new RingBuffer(8192);
     private Thread writer;
+    private long nMsgsRead;
+    private long nMsgsWrite;
 
     public Connection(Server server,Socket s) throws IOException {
         this.socket=s;
         this.server=server;
+
+        msg = new byte[server.getMaxMsgSize()];
 
         clientID = server.getNextClientID();
 
         remote = s.getRemoteSocketAddress().toString();
 
         socket.setTcpNoDelay(true);
-
-        s.setReceiveBufferSize(1024*1024);
-        s.setSendBufferSize(1024*1024);
 
         r = new UnsyncBufferedInputStream(s.getInputStream(),64*1024);
         w = new UnsyncBufferedOutputStream(s.getOutputStream(),64*1024);
@@ -51,48 +53,58 @@ class Connection {
             upgradeToSSL();
         }
     }
+
+    private final AtomicBoolean writerSync = new AtomicBoolean();
+
     void processConnection(){
-        Thread processor = new Thread("Processor("+socket.getRemoteSocketAddress()+")"){
-            public void run() {
-                while(true) {
-                    try {
-                        readMessages();
-                    } catch (IOException e) {
-                        server.closeConnection(Connection.this);
-                        break;
-                    }
+        Thread reader = new Thread(new ConnectionReader(),"Reader("+socket.getRemoteSocketAddress()+")");
+        reader.start();
+
+        writer = new Thread(new ConnectionWriter(),"Writer("+socket.getRemoteSocketAddress()+")");
+        writer.start();
+    }
+
+    private class ConnectionReader implements Runnable {
+        public void run() {
+            while(true) {
+                try {
+                    readMessages();
+                } catch (IOException e) {
+                    server.closeConnection(Connection.this);
+                    break;
                 }
             }
-        };
-        processor.start();
+        }
+    }
 
-        writer = new Thread("Writer("+socket.getRemoteSocketAddress()+")"){
-            public void run() {
-                while(!closed) {
-                    int count=0;
-                    try {
-                        Message m=null;
-                        while((m=queue.poll())!=null){
-                            writeMessage(m);
-                            count++;
-                        }
-                        if(count>1) {
-                            LockSupport.parkNanos(1000*1000*10);
-                        }
-                        if(queue.isEmpty()){
+    private class ConnectionWriter implements Runnable {
+        public void run() {
+
+            OutMessage m=null;
+            while(!closed) {
+                try {
+                    long deadline=0;
+                    while((m=queue.poll())==null && !closed){
+                        if(deadline==0)
+                            deadline=System.nanoTime() + Server.spinForTimeoutThreshold;
+                        if(System.nanoTime()>deadline){
+                            if(writerSync.compareAndSet(true,false))
+                                continue;
                             flush();
                             LockSupport.park();
                         }
-//                        flush();
-//                        LockSupport.park();
-                    } catch (IOException e) {
-                        server.closeConnection(Connection.this);
-                        break;
                     }
+                    writeMessage(m);
+                } catch (IOException e) {
+                    server.closeConnection(Connection.this);
+                    break;
+                } catch (Exception e) {
+                    server.logger.log(Level.WARNING,"connection failed",e);
+                    server.closeConnection(Connection.this);
+                    break;
                 }
             }
-        };
-        writer.start();
+        }
     }
 
     private void readMessages() throws IOException {
@@ -128,8 +140,10 @@ class Connection {
             }
             int len = args[index].toInt();
             readPayload(r,len);
-            server.processMessage(this,subject, reply,msg,len);
+            nMsgsRead++;
+            server.queueMessage(new InMessage(this,subject.dup(),reply.dup(),Arrays.copyOf(msg,len)));
         } else if (cmd.equalsIgnoreCase(PING)){
+            server.logger.fine("PING!");
             sendPong();
         } else if (cmd.equalsIgnoreCase(SUB)) {
             CharSeq subject = args[index++];
@@ -219,7 +233,7 @@ class Connection {
     }
 
     private void addSubscription(CharSeq subject, CharSeq group, int ssid) throws IOException {
-        server.logger.fine("subscribing subject="+subject+",group="+group+",ssid="+ssid);
+        server.logger.info("subscribing subject="+subject+",group="+group+",ssid="+ssid);
         Subscription s = new Subscription(this,ssid,subject.dup(),group.dup());
         server.addSubscription(s);
         if(isVerbose())
@@ -227,7 +241,7 @@ class Connection {
     }
 
     private void removeSubscription(int ssid) throws IOException {
-        server.logger.fine("un-subscribing ssid = "+ssid);
+        server.logger.info("un-subscribing ssid = "+ssid);
         Subscription s = new Subscription(this,ssid,CharSeq.EMPTY,CharSeq.EMPTY);
         server.removeSubscription(s);
         if(isVerbose())
@@ -249,9 +263,6 @@ class Connection {
     }
 
     private synchronized void flush() throws IOException {
-        // TODO, avoid flushing if possible - use heuristics to try and determine that
-        // more messages are probably going to arrive and if so, set a timer in the server
-        // to callback with the flush
         w.flush();
     }
 
@@ -266,13 +277,13 @@ class Connection {
     private static byte[] MSG = "MSG ".getBytes();
     private static byte[] CF_LF = "\r\n".getBytes();
 
-    private static class Message {
+    private static class OutMessage {
         final Subscription sub;
         final byte[] data;
         final CharSeq subject;
         final CharSeq reply;
 
-        public Message(Subscription sub, CharSeq subject, CharSeq reply, byte[] data) {
+        public OutMessage(Subscription sub, CharSeq subject, CharSeq reply, byte[] data) {
             this.sub=sub;
             this.subject=subject;
             this.reply=reply;
@@ -280,23 +291,32 @@ class Connection {
         }
     }
 
+
     void sendMessage(Subscription sub,CharSeq subject, CharSeq reply, byte[] data)  {
         if (closed)
             return;
 
-        Message m = new Message(sub,subject,reply,data);
+        OutMessage m = new OutMessage(sub,subject,reply,data);
         while(!queue.offer(m));
-        LockSupport.unpark(writer);
+        if(writerSync.compareAndSet(false,true))
+            LockSupport.unpark(writer);
     }
 
-    private synchronized void writeMessage(Message msg) throws IOException {
+    private synchronized void writeMessage(OutMessage msg) throws IOException {
+        if(msg==null)
+            return;
+
+        nMsgsWrite++;
+
 //        System.out.println("sending to "+sub+", subject="+subject);
         w.write(MSG);
         msg.subject.write(w);
         w.write(' ');
         writeInt(w,msg.sub.ssid);
-        w.write(' ');
-        msg.reply.write(w);
+        if(msg.reply.length()!=0) {
+            w.write(' ');
+            msg.reply.write(w);
+        }
         w.write(' ');
         writeInt(w,msg.data.length);
         w.write(CF_LF);
@@ -304,8 +324,8 @@ class Connection {
         w.write(CF_LF);
     }
 
-    private static byte[] intToBytes = new byte[32];
-    private static void writeInt(OutputStream w,int i) throws IOException {
+    private final byte[] intToBytes = new byte[32];
+    private void writeInt(OutputStream w,int i) throws IOException {
         int offset=intToBytes.length-1;
         do {
             char c = (char) (i%10+'0');
@@ -342,7 +362,9 @@ class Connection {
     }
 
     public void close() {
+        server.logger.fine("msgs read "+nMsgsRead+", write "+nMsgsWrite);
         try {
+            flush();
             socket.close();
         } catch (IOException e) {
             e.printStackTrace();
