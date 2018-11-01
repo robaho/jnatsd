@@ -28,6 +28,7 @@ public class RingBuffer<T> {
             return null;
         }
         T tmp = ring[head];
+        ring[head]=null;
         head = next(head);
         return tmp;
     }
