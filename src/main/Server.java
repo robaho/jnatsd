@@ -92,7 +92,7 @@ public class Server {
                 long deadline = 0;
                 while((m=queue.poll())==null){
                     if(deadline==0)
-                        deadline=System.nanoTime()+spinForTimeoutThreshold;
+                        deadline=System.nanoTime()+spinForTimeoutThreshold*10000;
                     if(System.nanoTime()>deadline) {
                         if(handlerSync.compareAndSet(true,false))
                             continue;
