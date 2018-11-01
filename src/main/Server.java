@@ -77,12 +77,15 @@ public class Server {
         };
         listener.start();
 
-        handler = new Thread(new QueueHandler(),"QueueHandler");
+        handler = new Thread(new MessageRouter(),"MessageRouter");
         handler.start();
     }
 
-    private class QueueHandler implements Runnable {
-        long handled=0;
+    /**
+     * routes 'in' messages to subscribed connections
+     */
+    private class MessageRouter implements Runnable {
+        long routed =0;
         public void run() {
             InMessage m;
             while (!done) {
@@ -96,8 +99,8 @@ public class Server {
                         LockSupport.park();
                     }
                 }
-                handled++;
-                handleMessage(m);
+                routed++;
+                routeMessage(m);
             }
         }
     }
@@ -113,14 +116,14 @@ public class Server {
         }
     }
 
-    private void handleMessage(InMessage m) {
-//        System.out.println("received message on "+subject+", reply "+reply+", "+new String(data));
+    private void routeMessage(InMessage m) {
+//        System.out.println("received message "+m);
 
         Map<CharSeq, SubscriptionMatch> _cache = cache;
 
         SubscriptionMatch cached = _cache.get(m.subject);
         if (cached != null) {
-            processMessage(m.connection,cached, m.subject, m.reply, m.data);
+            routeToMatch(m,cached);
             return;
         }
 
@@ -128,7 +131,7 @@ public class Server {
         SubscriptionMatch old = _cache.putIfAbsent(cached.subject,cached);
         if(old!=null)
             cached=old;
-        processMessage(m.connection,cached,m.subject, m.reply, m.data);
+        routeToMatch(m,cached);
     }
 
     private SubscriptionMatch buildSubscriptionMatch(CharSeq subject) {
@@ -172,8 +175,13 @@ public class Server {
         return match;
     }
 
-    private void processMessage(Connection from,SubscriptionMatch match, CharSeq subject, CharSeq reply, byte[] data) {
+    private void routeToMatch(InMessage msg,SubscriptionMatch match) {
         match.lastUsed = System.currentTimeMillis();
+
+        final Connection from = msg.connection;
+        final CharSeq subject = msg.subject;
+        final CharSeq reply = msg.reply;
+        final byte[] data = msg.data;
 
         for (Subscription s : match.subs) {
             if(s.connection==from && from.isEcho())
