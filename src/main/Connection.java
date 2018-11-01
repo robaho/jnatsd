@@ -25,7 +25,6 @@ class Connection {
     private ConnectionOptions options = new ConnectionOptions();
     private boolean isSSL;
     private CharSeq[] args = new CharSeq[4];
-    private final byte[] msg;
     private final RingBuffer<OutMessage> queue = new RingBuffer(8192);
     private Thread writer;
     private long nMsgsRead;
@@ -35,16 +34,14 @@ class Connection {
         this.socket=s;
         this.server=server;
 
-        msg = new byte[server.getMaxMsgSize()];
-
         clientID = server.getNextClientID();
 
         remote = s.getRemoteSocketAddress().toString();
 
         socket.setTcpNoDelay(true);
 
-        r = new UnsyncBufferedInputStream(s.getInputStream(),64*1024);
-        w = new UnsyncBufferedOutputStream(s.getOutputStream(),64*1024);
+        r = new UnsyncBufferedInputStream(s.getInputStream(),256*1024);
+        w = new UnsyncBufferedOutputStream(s.getOutputStream(),256*1024);
 
         w.write(server.getInfoAsJSON(this).getBytes());
         flush();
@@ -139,7 +136,8 @@ class Connection {
                 reply = args[index++];
             }
             int len = args[index].toInt();
-            readPayload(r,len);
+            byte[] msg = new byte[len];
+            readPayload(r,msg);
             nMsgsRead++;
             server.queueMessage(new InMessage(this,subject.dup(),reply.dup(),Arrays.copyOf(msg,len)));
         } else if (cmd.equalsIgnoreCase(PING)){
@@ -350,8 +348,8 @@ class Connection {
         return new CharSeq(buffer,0,len);
     }
 
-    private void readPayload(InputStream r,int len) throws IOException {
-        int offset = 0;
+    private void readPayload(InputStream r,byte[] msg) throws IOException {
+        int len=msg.length;int offset=0;
         while (len > 0) {
             int read = r.read(msg, offset, len);
             offset += read;
