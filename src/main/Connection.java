@@ -82,7 +82,7 @@ class Connection {
                 try {
                     long deadline=0;
                     while((m=queue.poll())==null && !closed){
-                        if(deadline==0)
+                        if(deadline==0) // the longer the deadline, the more we delay the flush if one is required, hurting latency for individual requests
                             deadline=System.nanoTime() + Server.spinForTimeoutThreshold;
                         if(System.nanoTime()>deadline){
                             if(writerSync.compareAndSet(true,false))
