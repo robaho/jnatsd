@@ -295,7 +295,7 @@ class Connection {
             return;
 
         OutMessage m = new OutMessage(sub,subject,reply,data);
-        while(!queue.offer(m));
+        while(!queue.offer(m) && !closed);
         if(writerSync.compareAndSet(false,true))
             LockSupport.unpark(writer);
     }
