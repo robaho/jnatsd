@@ -273,7 +273,7 @@ class Connection {
     }
 
     private static byte[] MSG = "MSG ".getBytes();
-    private static byte[] CF_LF = "\r\n".getBytes();
+    private static byte[] CR_LF = "\r\n".getBytes();
 
     private static class OutMessage {
         final Subscription sub;
@@ -317,9 +317,9 @@ class Connection {
         }
         w.write(' ');
         writeInt(w,msg.data.length);
-        w.write(CF_LF);
+        w.write(CR_LF);
         w.write(msg.data);
-        w.write(CF_LF);
+        w.write(CR_LF);
     }
 
     private final byte[] intToBytes = new byte[32];
