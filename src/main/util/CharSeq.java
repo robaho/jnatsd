@@ -147,9 +147,9 @@ public final class CharSeq implements CharSequence {
         return n;
     }
 
-    public void write(OutputStream os) throws IOException {
+    public void write(ByteBuffer os) throws IOException {
         if(len==0)
             return;
-        os.write(array,offset,len);
+        os.put(array,offset,len);
     }
 }

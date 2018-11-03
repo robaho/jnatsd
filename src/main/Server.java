@@ -17,7 +17,7 @@ import java.util.logging.Logger;
 
 public class Server {
     private int port;
-    private Thread listener, handler;
+    private Thread listener, handler, flusher;
     private Set<Connection> connections = Collections.newSetFromMap(new ConcurrentHashMap<>());
     Logger logger = Logger.getLogger("server");
 
@@ -77,6 +77,33 @@ public class Server {
         };
         listener.start();
 
+
+        flusher = new Thread("Flusher") {
+            public void run() {
+                long flushes=0;
+                while (!done) {
+                    long now = System.nanoTime();
+                    for(Connection c : connections) {
+                        long nanos = c.lastWrite;
+                        if(nanos!=0 && now-nanos > 500*1000) {
+                            try {
+                                c.flush();
+                                flushes++;
+                                if(flushes%10000==0){
+                                    System.out.println("flushes "+flushes);
+                                }
+                            } catch (IOException e) {
+                                logger.log(Level.SEVERE,"unable to flush",e);
+                                closeConnection(c);
+                            }
+                        }
+                    }
+                    LockSupport.parkNanos(500*1000);
+                }
+            }
+        };
+        flusher.start();
+
         handler = new Thread(new MessageRouter(),"MessageRouter");
         handler.start();
     }
@@ -109,8 +136,17 @@ public class Server {
         return clientIDs.incrementAndGet();
     }
 
+    long waits;
     void queueMessage(InMessage m){
-        while(!queue.offer(m));
+//        routeMessage(m);
+        long deadline=System.nanoTime()+spinForTimeoutThreshold;
+        long backoff=1;
+        while(!queue.offer(m)){
+            if(System.nanoTime()>deadline){
+                LockSupport.parkNanos(1000*(backoff*=2));
+            }
+            backoff=Math.min(backoff,1000);
+        }
         if(handlerSync.compareAndSet(false,true)) {
             LockSupport.unpark(handler);
         }
@@ -179,14 +215,11 @@ public class Server {
         match.lastUsed = System.currentTimeMillis();
 
         final Connection from = msg.connection;
-        final CharSeq subject = msg.subject;
-        final CharSeq reply = msg.reply;
-        final byte[] data = msg.data;
 
         for (Subscription s : match.subs) {
             if(s.connection==from && from.isEcho())
                 continue;
-            s.connection.sendMessage(s, subject, reply, data);
+            s.connection.sendMessage(s, msg);
         }
 
         if(match.groups.isEmpty())
@@ -195,7 +228,7 @@ public class Server {
         for (Map.Entry<CharSeq, List<Subscription>> group : match.groups.entrySet()) {
             List<Subscription> subs = group.getValue();
             Subscription gs = subs.get((int) System.currentTimeMillis() % subs.size());
-            gs.connection.sendMessage(gs, subject, reply, data);
+            gs.connection.sendMessage(gs, msg);
         }
     }
 
