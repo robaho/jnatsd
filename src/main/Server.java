@@ -179,14 +179,11 @@ public class Server {
         match.lastUsed = System.currentTimeMillis();
 
         final Connection from = msg.connection;
-        final CharSeq subject = msg.subject;
-        final CharSeq reply = msg.reply;
-        final byte[] data = msg.data;
 
         for (Subscription s : match.subs) {
             if(s.connection==from && from.isEcho())
                 continue;
-            s.connection.sendMessage(s, subject, reply, data);
+            s.connection.sendMessage(s, msg);
         }
 
         if(match.groups.isEmpty())
@@ -195,7 +192,7 @@ public class Server {
         for (Map.Entry<CharSeq, List<Subscription>> group : match.groups.entrySet()) {
             List<Subscription> subs = group.getValue();
             Subscription gs = subs.get((int) System.currentTimeMillis() % subs.size());
-            gs.connection.sendMessage(gs, subject, reply, data);
+            gs.connection.sendMessage(gs, msg);
         }
     }
 

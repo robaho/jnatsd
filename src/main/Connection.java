@@ -277,48 +277,45 @@ class Connection {
 
     private static class OutMessage {
         final Subscription sub;
-        final byte[] data;
-        final CharSeq subject;
-        final CharSeq reply;
+        final InMessage msg;
 
-        public OutMessage(Subscription sub, CharSeq subject, CharSeq reply, byte[] data) {
+        public OutMessage(Subscription sub, InMessage msg) {
             this.sub=sub;
-            this.subject=subject;
-            this.reply=reply;
-            this.data=data;
+            this.msg=msg;
         }
     }
 
-
-    void sendMessage(Subscription sub,CharSeq subject, CharSeq reply, byte[] data)  {
+    void sendMessage(Subscription sub,InMessage msg)  {
         if (closed)
             return;
 
-        OutMessage m = new OutMessage(sub,subject,reply,data);
+        OutMessage m = new OutMessage(sub,msg);
         while(!queue.offer(m) && !closed);
         if(writerSync.compareAndSet(false,true))
             LockSupport.unpark(writer);
     }
 
-    private synchronized void writeMessage(OutMessage msg) throws IOException {
-        if(msg==null)
+    private synchronized void writeMessage(OutMessage out) throws IOException {
+        if(out==null)
             return;
 
         nMsgsWrite++;
 
+        InMessage in = out.msg;
+
 //        System.out.println("sending to "+sub+", subject="+subject);
         w.write(MSG);
-        msg.subject.write(w);
+        in.subject.write(w);
         w.write(' ');
-        writeInt(w,msg.sub.ssid);
-        if(msg.reply.length()!=0) {
+        writeInt(w,out.sub.ssid);
+        if(out.msg.reply.length()!=0) {
             w.write(' ');
-            msg.reply.write(w);
+            in.reply.write(w);
         }
         w.write(' ');
-        writeInt(w,msg.data.length);
+        writeInt(w,in.data.length);
         w.write(CR_LF);
-        w.write(msg.data);
+        w.write(in.data);
         w.write(CR_LF);
     }
 
