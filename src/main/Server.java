@@ -5,8 +5,9 @@ import com.robaho.jnatsd.util.JSON;
 import com.robaho.jnatsd.util.RingBuffer;
 
 import java.io.*;
-import java.net.ServerSocket;
-import java.net.Socket;
+import java.net.InetSocketAddress;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -54,22 +55,22 @@ public class Server {
     private final AtomicBoolean handlerSync = new AtomicBoolean();
 
     public void start() throws IOException {
-        ServerSocket socket = new ServerSocket(port);
+        ServerSocketChannel socket = ServerSocketChannel.open().bind(new InetSocketAddress(port),128);
 
         listener = new Thread("Listener") {
             public void run() {
                 while (!done) {
                     try {
-                        Socket s = socket.accept();
+                        SocketChannel s = socket.accept();
 
-                        logger.info("Connection from " + s.getRemoteSocketAddress());
+                        logger.info("Connection from " + s.getRemoteAddress());
+                        Connection c = new Connection(Server.this, s.socket());
                         synchronized (connections) {
-                            Connection c = new Connection(Server.this, s);
                             connections.add(c);
-                            c.processConnection();
                         }
+                        c.processConnection();
                     } catch (IOException e) {
-                        logger.log(Level.FINE,"acceptor failed",e);
+                        logger.log(Level.SEVERE,"acceptor failed",e);
                     }
                 }
 

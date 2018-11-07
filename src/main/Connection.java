@@ -7,6 +7,8 @@ import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 import java.io.*;
 import java.net.Socket;
+import java.nio.ByteBuffer;
+import java.nio.channels.SocketChannel;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.Map;
@@ -16,10 +18,9 @@ import java.util.concurrent.locks.LockSupport;
 import java.util.logging.Level;
 
 class Connection {
-    private InputStream r;
-    private OutputStream w;
     private final Server server;
     private Socket socket;
+    private SocketChannel ch;
     private final String remote;
     private volatile boolean closed;
     private int clientID;
@@ -36,6 +37,7 @@ class Connection {
 
     public Connection(Server server,Socket s) throws IOException {
         this.socket=s;
+        this.ch=s.getChannel();
         this.server=server;
 
         clientID = server.getNextClientID();
@@ -44,12 +46,7 @@ class Connection {
 
         rBuffer.flip();
 
-        socket.setTcpNoDelay(true);
-
-        r = new UnsyncBufferedInputStream(s.getInputStream(),256*1024);
-        w = new UnsyncBufferedOutputStream(s.getOutputStream(),256*1024);
-
-        w.write(server.getInfoAsJSON(this).getBytes());
+        write(server.getInfoAsJSON(this).getBytes());
         flush();
 
         if(server.isTLSRequired()){
@@ -116,6 +113,23 @@ class Connection {
         }
     }
 
+    private synchronized void write(byte[] bytes) throws IOException {
+        write(bytes,0,bytes.length);
+    }
+
+    private synchronized void write(byte[] bytes,int offset,int len) throws IOException {
+        while(len>0) {
+            if(wBuffer.remaining()==0){
+                flush();
+            }
+            int n = Math.min(len,wBuffer.remaining());
+            wBuffer.put(bytes,offset,n);
+            offset+=n;
+            len-=n;
+        }
+    }
+
+
     private void readMessages() throws IOException {
         byte[] buffer = new byte[1024];
 
@@ -181,8 +195,10 @@ class Connection {
 
     private static final byte[] PONG = "PONG\r\n".getBytes();
     private synchronized void sendPong() throws IOException {
-        w.write(PONG);
-        flush();
+        ByteBuffer bb = ByteBuffer.wrap(PONG);
+        do {
+            ch.write(bb);
+        } while(bb.hasRemaining());
     }
 
     private void processConnectionOptions(String json) throws IOException {
@@ -216,9 +232,6 @@ class Connection {
         socket = sslSocket;
 
         isSSL=true;
-
-        r = new BufferedInputStream(socket.getInputStream());
-        w = new BufferedOutputStream(socket.getOutputStream());
     }
 
     private void printCiphers(SSLSocketFactory ssf) {
@@ -265,7 +278,7 @@ class Connection {
 
     private static byte[] OK = "+OK\r\n".getBytes();
     private synchronized void sendOK() throws IOException {
-        w.write(OK);
+        write(OK);
         flush();
     }
 
@@ -273,12 +286,21 @@ class Connection {
         sendError(e.toString());
     }
     private synchronized void sendError(String err) throws IOException {
-        w.write(("-ERR '"+err+"'\r\n").getBytes());
+        write(("-ERR '"+err+"'\r\n").getBytes());
         flush();
     }
 
-    private synchronized void flush() throws IOException {
-        w.flush();
+    synchronized void flush() throws IOException {
+        if(closed)
+            return;
+
+        lastWrite=0;
+        wBuffer.flip();
+        while(wBuffer.hasRemaining()) {
+            if(ch.write(wBuffer)==-1)
+                throw new IOException("stream closed");
+        }
+        wBuffer.clear();
     }
 
     private boolean isVerbose() {
@@ -304,7 +326,7 @@ class Connection {
 
     long lastWrite;
 
-    void sendMessage(Subscription sub,InMessage msg)  {
+    void sendMessage(Subscription sub,InMessage msg) {
         if (closed)
             return;
 
@@ -334,10 +356,11 @@ class Connection {
         ByteBuffer hdr = ByteBuffer.wrap(header);
 
 //        System.out.println("sending to "+sub+", subject="+subject);
-        w.write(MSG);
-        in.subject.write(w);
-        w.write(' ');
-        writeInt(w,out.sub.ssid);
+
+        hdr.put(MSG);
+        in.subject.write(hdr);
+        hdr.put((byte)' ');
+        writeInt(hdr,out.sub.ssid);
         if(out.msg.reply.length()!=0) {
             hdr.put((byte)' ');
             in.reply.write(hdr);

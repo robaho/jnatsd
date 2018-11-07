@@ -2,6 +2,7 @@ package com.robaho.jnatsd.util;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
 import java.util.Arrays;
 
 public final class CharSeq implements CharSequence {
