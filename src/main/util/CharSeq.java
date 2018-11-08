@@ -93,13 +93,15 @@ public final class CharSeq implements CharSequence {
         if(!(o instanceof CharSeq))
             return false;
         CharSeq s0 = (CharSeq) o;
-        if(len!=s0.len || hashCode!=s0.hashCode)
+        if(hashCode!=s0.hashCode || len!=s0.len)
             return false;
-        byte[] array0 = s0.array;
-        int off = offset;
-        int off0 = s0.offset;
-        for(int i=0;i<len;i++){
-            if(array[off++]!=array0[off0++])
+
+        final int off = offset;
+        final int off0 = s0.offset;
+        final int l = len;
+
+        for(int i=0;i<l;i++) {
+            if(array[off+i]!=s0.array[off0+i])
                 return false;
         }
         return true;
@@ -129,26 +131,28 @@ public final class CharSeq implements CharSequence {
         int n=0;
         int start=0;
         int hash=0;
-        for(int i=0;i<len;i++) {
-            byte c = array[i];
+
+        final byte[] a = array;
+        final int l = len;
+
+        for(int i=0;i<l;i++) {
+            byte c = a[i];
             if(c==' '){
-                segs[n++]=new CharSeq(array,start,i-start,hash);
-                while(i<len && c==' '){
-                    i++;
-                    c=array[i];
+                if(i-start>0) {
+                    segs[n++] = new CharSeq(a, start, i - start, hash);
                 }
-                start=i;
+                start=i+1;
                 hash=0;
             }
             hash = hash * 31 + c;
         }
-        if(start!=len){
-            segs[n++]=new CharSeq(array,start,len-start,hash);
+        if(start!=l){
+            segs[n++]=new CharSeq(a,start,l-start,hash);
         }
         return n;
     }
 
-    public void write(ByteBuffer os) throws IOException {
+    public void write(ByteBuffer os) {
         if(len==0)
             return;
         os.put(array,offset,len);

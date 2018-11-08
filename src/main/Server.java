@@ -6,10 +6,10 @@ import com.robaho.jnatsd.util.RingBuffer;
 
 import java.io.*;
 import java.net.InetSocketAddress;
-import java.nio.channels.ServerSocketChannel;
-import java.nio.channels.SocketChannel;
+import java.nio.ByteBuffer;
+import java.nio.channels.*;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
@@ -18,7 +18,7 @@ import java.util.logging.Logger;
 
 public class Server {
     private int port;
-    private Thread listener, handler, flusher;
+    private Thread listener, flusher, writer, reader;
     private Set<Connection> connections = Collections.newSetFromMap(new ConcurrentHashMap<>());
     Logger logger = Logger.getLogger("server");
 
@@ -32,7 +32,7 @@ public class Server {
     private volatile Map<CharSeq, SubscriptionMatch> cache = new ConcurrentHashMap();
     private AtomicInteger clientIDs = new AtomicInteger(0);
     private boolean tlsRequired;
-    private final RingBuffer<InMessage> queue = new RingBuffer<>(64*1024);
+    private final RingBuffer<IOFuture> wqueue = new RingBuffer<>(1024);
     private volatile boolean done;
 
     static final long spinForTimeoutThreshold = 1000L;
@@ -45,6 +45,42 @@ public class Server {
         return maxMsgSize;
     }
 
+    private Selector selector;
+
+    public Future<Boolean> bgWrite(SocketChannel c,ByteBuffer bb) {
+        IOFuture f = new IOFuture(c,bb);
+        while(!wqueue.offer(f));
+        if(writerSync.compareAndSet(false,true)) {
+            LockSupport.unpark(writer);
+        }
+
+        return f;
+    }
+
+    public Future<Boolean> bgRead(SocketChannel c, ByteBuffer bb) {
+        IOFuture f = new IOFuture(c,bb);
+//        try {
+//            int n = c.read(bb);
+//            if(n>0){
+//                f.setResult(false);
+//                return f;
+//            }
+//        } catch (IOException e) {
+//            f.setResult(true);
+//            return f;
+//        }
+
+        SelectionKey key = c.keyFor(selector);
+        if(key==null || !key.isValid()){
+            f.setResult(true);
+            return f;
+        }
+        key.attach(f);
+        key.interestOps(SelectionKey.OP_READ);
+        selector.wakeup();
+        return f;
+    }
+
     private static class SubscriptionMatch {
         long lastUsed; // for LRU cache purge
         CharSeq subject;
@@ -52,9 +88,59 @@ public class Server {
         Map<CharSeq, List<Subscription>> groups = new HashMap<>();
     }
 
-    private final AtomicBoolean handlerSync = new AtomicBoolean();
+    private final AtomicBoolean writerSync = new AtomicBoolean();
+
+    private class IOFuture implements Future<Boolean> {
+        SocketChannel c;
+        ByteBuffer b;
+        Boolean result;
+
+        IOFuture(SocketChannel c, ByteBuffer b){
+            this.c=c;
+            this.b=b;
+        }
+
+        @Override
+        public boolean cancel(boolean mayInterruptIfRunning) {
+            return false;
+        }
+
+        @Override
+        public boolean isCancelled() {
+            return false;
+        }
+
+        @Override
+        public boolean isDone() {
+            return result!=null;
+        }
+
+        @Override
+        public synchronized Boolean get() throws InterruptedException, ExecutionException {
+            while(result==null){
+                wait();
+            }
+            return result;
+        }
+
+        @Override
+        public Boolean get(long timeout, TimeUnit unit) throws InterruptedException, ExecutionException, TimeoutException {
+            while(result==null){
+                wait(unit.toMillis(timeout));
+            }
+            return result;
+        }
+
+        synchronized void setResult(Boolean b){
+            result=b;
+            notifyAll();
+        }
+    }
 
     public void start() throws IOException {
+
+        selector = Selector.open();
+
         ServerSocketChannel socket = ServerSocketChannel.open().bind(new InetSocketAddress(port),128);
 
         listener = new Thread("Listener") {
@@ -62,14 +148,18 @@ public class Server {
                 while (!done) {
                     try {
                         SocketChannel s = socket.accept();
+                        s.configureBlocking(false);
+
+                        s.register(selector,0);
 
                         logger.info("Connection from " + s.getRemoteAddress());
-                        Connection c = new Connection(Server.this, s.socket());
+                        Connection c = new Connection(Server.this, s);
                         synchronized (connections) {
                             connections.add(c);
+                            LockSupport.unpark(flusher);
                         }
                         c.processConnection();
-                    } catch (IOException e) {
+                    } catch (Exception e) {
                         logger.log(Level.SEVERE,"acceptor failed",e);
                     }
                 }
@@ -78,82 +168,119 @@ public class Server {
         };
         listener.start();
 
-
-        flusher = new Thread("Flusher") {
-            public void run() {
-                long flushes=0;
-                while (!done) {
-                    long now = System.nanoTime();
-                    for(Connection c : connections) {
-                        long nanos = c.lastWrite;
-                        if(nanos!=0 && now-nanos > 500*1000) {
-                            try {
-                                c.flush();
-                                flushes++;
-                                if(flushes%10000==0){
-                                    System.out.println("flushes "+flushes);
-                                }
-                            } catch (IOException e) {
-                                logger.log(Level.SEVERE,"unable to flush",e);
-                                closeConnection(c);
-                            }
-                        }
-                    }
-                    LockSupport.parkNanos(500*1000);
-                }
-            }
-        };
+        flusher = new Thread(new Flusher(),"Flusher");
         flusher.start();
 
-        handler = new Thread(new MessageRouter(),"MessageRouter");
-        handler.start();
+        writer = new Thread(new Writer(),"Writer");
+        writer.start();
+
+        reader = new Thread(new Reader(),"Reader");
+        reader.start();
     }
 
     /**
-     * routes 'in' messages to subscribed connections
+     * used to background flush connections that need them. pretty dumb at this point.
      */
-    private class MessageRouter implements Runnable {
-        long routed =0;
+    private class Flusher implements Runnable {
         public void run() {
-            InMessage m;
+            long flushes=0;
+            while (!done) {
+                long now = System.nanoTime();
+                for(Connection c : connections) {
+                    long nanos = c.lastWrite;
+                    if(nanos!=0 && now-nanos > 1000*1000) {
+                        try {
+                            c.flush();
+                            flushes++;
+//                            if(flushes%10000==0){
+//                                System.out.println("flushes "+flushes);
+//                            }
+                        } catch (IOException e) {
+                            logger.log(Level.SEVERE,"unable to flush",e);
+                            closeConnection(c);
+                        }
+                    }
+                }
+                if(connections.isEmpty())
+                    LockSupport.park();
+                else
+                    LockSupport.parkNanos(1000*1000);
+            }
+        }
+    }
+
+    /**
+     * background writes (flushes) data to socket
+     */
+    private class Writer implements Runnable {
+        public void run() {
+            IOFuture f;
             while (!done) {
                 long deadline = 0;
-                while((m=queue.poll())==null){
+                while((f=wqueue.poll())==null){
                     if(deadline==0)
                         deadline=System.nanoTime()+spinForTimeoutThreshold*10000;
                     if(System.nanoTime()>deadline) {
-                        if(handlerSync.compareAndSet(true,false))
+                        if(writerSync.compareAndSet(true,false))
                             continue;
                         LockSupport.park();
                     }
                 }
-                routed++;
-                routeMessage(m);
+                try {
+                    f.c.write(f.b);
+                    if(!f.b.hasRemaining()){
+                        f.setResult(false);
+                    } else {
+                        if(!wqueue.offer(f)) {
+                            throw new IOException("wqueue is full, too many connections!");
+                        }
+                    }
+                } catch (IOException e) {
+                    f.setResult(true);
+                }
             }
         }
     }
+
+    /**
+     * background writes (flushes) data to socket
+     */
+    private class Reader implements Runnable {
+        public void run() {
+
+            while(!done) {
+                try {
+                    selector.select();
+                    Iterator i = selector.selectedKeys().iterator();
+                    while(i.hasNext()) {
+                        SelectionKey key = (SelectionKey) i.next();
+                        i.remove();
+                        IOFuture f = (IOFuture) key.attachment();
+                        int result = f.c.read(f.b);
+                        if(result<0){
+                            f.setResult(true);
+                            key.cancel();
+                        } else {
+                            if(result==0)
+                                continue;
+                            key.interestOps(0);
+                            f.setResult(false);
+                        }
+                    }
+                } catch (IOException e) {
+                    logger.log(Level.SEVERE,"select failed",e);
+                }
+            }
+        }
+    }
+
+
 
     public int getNextClientID() {
         return clientIDs.incrementAndGet();
     }
 
-    long waits;
-    void queueMessage(InMessage m){
-//        routeMessage(m);
-        long deadline=System.nanoTime()+spinForTimeoutThreshold;
-        long backoff=1;
-        while(!queue.offer(m)){
-            if(System.nanoTime()>deadline){
-                LockSupport.parkNanos(1000*(backoff*=2));
-            }
-            backoff=Math.min(backoff,1000);
-        }
-        if(handlerSync.compareAndSet(false,true)) {
-            LockSupport.unpark(handler);
-        }
-    }
-
-    private void routeMessage(InMessage m) {
+    void routeMessage(InMessage m) {
 //        System.out.println("received message "+m);
 
         Map<CharSeq, SubscriptionMatch> _cache = cache;
@@ -238,8 +365,6 @@ public class Server {
 
         listener.interrupt();
         listener.join();
-        handler.interrupt();
-        handler.join();
     }
 
     public void waitTillDone() throws InterruptedException {

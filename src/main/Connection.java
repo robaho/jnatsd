@@ -1,25 +1,20 @@
 package com.robaho.jnatsd;
 
 import com.robaho.jnatsd.util.*;
-import com.sun.xml.internal.ws.policy.privateutil.PolicyUtils;
 
-import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 import java.io.*;
-import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.TreeMap;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.locks.LockSupport;
+import java.util.concurrent.Future;
 import java.util.logging.Level;
 
 class Connection {
     private final Server server;
-    private Socket socket;
     private SocketChannel ch;
     private final String remote;
     private volatile boolean closed;
@@ -27,24 +22,28 @@ class Connection {
     private ConnectionOptions options = new ConnectionOptions();
     private boolean isSSL;
     private CharSeq[] args = new CharSeq[4];
-    private final RingBuffer<OutMessage> queue = new RingBuffer(8192);
-//    private Thread writer;
     private long nMsgsRead;
     private long nMsgsWrite;
 
     private final ByteBuffer rBuffer = ByteBuffer.allocateDirect(64*1024);
-    private final ByteBuffer wBuffer = ByteBuffer.allocateDirect(64*1024);
+    private final ByteBuffer rBuffer0 = ByteBuffer.allocateDirect(64*1024);
 
-    public Connection(Server server,Socket s) throws IOException {
-        this.socket=s;
-        this.ch=s.getChannel();
+    private final ByteBuffer wBuffer = ByteBuffer.allocateDirect(64*1024);
+    private final ByteBuffer wBuffer0 = ByteBuffer.allocateDirect(64*1024);
+
+    private Future<Boolean> writeRequest,readRequest;
+
+    public Connection(Server server, SocketChannel ch) throws IOException {
+        this.ch=ch;
         this.server=server;
 
         clientID = server.getNextClientID();
 
-        remote = s.getRemoteSocketAddress().toString();
+        remote = ch.getRemoteAddress().toString();
 
         rBuffer.flip();
+
+        readRequest = server.bgRead(ch,rBuffer0);
 
         write(server.getInfoAsJSON(this).getBytes());
         flush();
@@ -54,14 +53,9 @@ class Connection {
         }
     }
 
-    private final AtomicBoolean writerSync = new AtomicBoolean();
-
     void processConnection(){
-        Thread reader = new Thread(new ConnectionReader(),"Reader("+socket.getRemoteSocketAddress()+")");
+        Thread reader = new Thread(new ConnectionReader(),"Reader("+getRemote()+")");
         reader.start();
-
-//        writer = new Thread(new ConnectionWriter(),"Writer("+socket.getRemoteSocketAddress()+")");
-//        writer.start();
     }
 
     private class ConnectionReader implements Runnable {
@@ -70,45 +64,6 @@ class Connection {
                 readMessages();
             } catch (IOException e) {
                 server.closeConnection(Connection.this);
-            }
-        }
-    }
-
-    private class ConnectionWriter implements Runnable {
-        public void run() {
-
-            OutMessage m=null;
-            while(!closed) {
-                try {
-                    long deadline=0;
-                    while((m=queue.poll())==null && !closed){
-                        if(deadline==0) // the longer the deadline, the more we delay the flush if one is required, hurting latency for individual requests
-                            deadline=System.nanoTime() + Server.spinForTimeoutThreshold;
-                        if(System.nanoTime()>deadline){
-                            if(writerSync.compareAndSet(true,false))
-                                continue;
-                            flush();
-                            LockSupport.park();
-                        }
-                    }
-//                    while((m=queue.poll())==null && !closed){
-//                        if(writerSync.compareAndSet(true,false))
-//                            continue;
-////                        LockSupport.parkNanos(500*1000);
-////                        if(writerSync.compareAndSet(true,false))
-////                            continue;
-//                        flush();
-//                        LockSupport.park();
-//                    }
-                    writeMessage(m);
-                } catch (IOException e) {
-                    server.closeConnection(Connection.this);
-                    break;
-                } catch (Exception e) {
-                    server.logger.log(Level.WARNING,"connection failed",e);
-                    server.closeConnection(Connection.this);
-                    break;
-                }
             }
         }
     }
@@ -127,8 +82,8 @@ class Connection {
             offset+=n;
             len-=n;
         }
+        lastWrite=System.nanoTime();
     }
-
 
     private void readMessages() throws IOException {
         byte[] buffer = new byte[1024];
@@ -144,6 +99,7 @@ class Connection {
             }
         }
     }
+
     private static final CharSeq PUB = new CharSeq("PUB");
     private static final CharSeq PING = new CharSeq("PING");
     private static final CharSeq SUB = new CharSeq("SUB");
@@ -151,6 +107,7 @@ class Connection {
     private static final CharSeq CONNECT = new CharSeq("CONNECT");
 
     private final byte[] crlf = new byte[2];
+    private byte[] msg = new byte[1024];
 
     private void processLine(CharSeq line) throws IOException {
         int index=1;
@@ -164,14 +121,14 @@ class Connection {
                 reply = args[index++];
             }
             int len = args[index].toInt();
-            byte[] msg = new byte[len];
-            readBytes(msg);
-            readBytes(crlf);
+            if(len>msg.length){
+                msg = new byte[len];
+            }
+            readBytes(msg,len+2); // read the cr-lf too
 //            System.out.println("read msg "+msg.length);
             nMsgsRead++;
-            server.queueMessage(new InMessage(this,subject.dup(),reply.dup(),msg));
+            server.routeMessage(new InMessage(this,subject,reply,msg,len));
         } else if (cmd.equalsIgnoreCase(PING)){
-            System.out.println("GOT PING!");
             server.logger.fine("PING!");
             sendPong();
         } else if (cmd.equalsIgnoreCase(SUB)) {
@@ -195,10 +152,8 @@ class Connection {
 
     private static final byte[] PONG = "PONG\r\n".getBytes();
     private synchronized void sendPong() throws IOException {
-        ByteBuffer bb = ByteBuffer.wrap(PONG);
-        do {
-            ch.write(bb);
-        } while(bb.hasRemaining());
+        write(PONG);
+        flush();
     }
 
     private void processConnectionOptions(String json) throws IOException {
@@ -215,21 +170,21 @@ class Connection {
         if(isSSL)
             return;
 
-//        System.out.println("upgrading socket to SSL");
-        SSLSocketFactory ssf =
-                (SSLSocketFactory)SSLSocketFactory.getDefault();
-
-//        printCiphers(ssf);
-
-        SSLSocket sslSocket =
-                (SSLSocket)ssf.
-                        createSocket(socket,
-                                socket.getInetAddress().getHostAddress(),
-                                socket.getPort(),
-                                false);
-        sslSocket.setUseClientMode(false);
-        sslSocket.startHandshake();
-        socket = sslSocket;
+////        System.out.println("upgrading socket to SSL");
+//        SSLSocketFactory ssf =
+//                (SSLSocketFactory)SSLSocketFactory.getDefault();
+//
+////        printCiphers(ssf);
+//
+//        SSLSocket sslSocket =
+//                (SSLSocket)ssf.
+//                        createSocket(socket,
+//                                socket.getInetAddress().getHostAddress(),
+//                                socket.getPort(),
+//                                false);
+//        sslSocket.setUseClientMode(false);
+//        sslSocket.startHandshake();
+//        socket = sslSocket;
 
         isSSL=true;
     }
@@ -294,13 +249,26 @@ class Connection {
         if(closed)
             return;
 
-        lastWrite=0;
-        wBuffer.flip();
-        while(wBuffer.hasRemaining()) {
-            if(ch.write(wBuffer)==-1)
-                throw new IOException("stream closed");
+        if(wBuffer.position()==0)
+            return;
+
+        if(writeRequest!=null) {
+            try {
+                if(writeRequest.get())
+                    throw new IOException("stream closed");
+            } catch (Exception e) {
+                throw new IOException("background write failed",e);
+            }
         }
+
+        wBuffer0.clear();
+        wBuffer.flip();
+        wBuffer0.put(wBuffer);
+        wBuffer0.flip();
+
         wBuffer.clear();
+
+        writeRequest = server.bgWrite(ch, wBuffer0);
     }
 
     private boolean isVerbose() {
@@ -324,7 +292,7 @@ class Connection {
         }
     }
 
-    long lastWrite;
+    volatile long lastWrite;
 
     void sendMessage(Subscription sub,InMessage msg) {
         if (closed)
@@ -333,15 +301,10 @@ class Connection {
         OutMessage m = new OutMessage(sub,msg);
         try {
             writeMessage(m);
-            lastWrite=System.nanoTime();
         } catch (IOException e) {
             server.logger.log(Level.WARNING,"write to connection failed",e);
             server.closeConnection(this);
         }
-
-//        while(!queue.offer(m) && !closed);
-//        if(writerSync.compareAndSet(false,true))
-//            LockSupport.unpark(writer);
     }
 
     private byte[] header = new byte[1024];
@@ -366,17 +329,17 @@ class Connection {
             in.reply.write(hdr);
         }
         hdr.put((byte)' ');
-        writeInt(hdr,in.data.length);
+        writeInt(hdr,in.datalen);
         hdr.put(CR_LF);
 
         write(hdr.array(),0,hdr.position());
 
-        write(in.data);
+        write(in.data,0, in.datalen);
         write(CR_LF);
     }
 
     private final byte[] intToBytes = new byte[32];
-    private void writeInt(ByteBuffer w,int i) throws IOException {
+    private void writeInt(ByteBuffer w,int i) {
         int offset=intToBytes.length-1;
         do {
             char c = (char) (i%10+'0');
@@ -391,10 +354,7 @@ class Connection {
 
         while(true) {
             while(!rBuffer.hasRemaining()){
-                rBuffer.clear();
-                if(ch.read(rBuffer)==-1)
-                    throw new IOException("stream closed");
-                rBuffer.flip();
+                fillBuffer();
             }
             int c = rBuffer.get();
             if (c == -1)
@@ -408,19 +368,32 @@ class Connection {
         }
     }
 
-    private void readBytes(byte[] msg) throws IOException {
-        int len=msg.length;int offset=0;
+    private void fillBuffer() throws IOException {
+        rBuffer.clear();
+
+        try {
+            if(readRequest.get())
+                throw new IOException("read failed");
+        } catch (Exception e) {
+            throw new IOException("read failed",e);
+        }
+        rBuffer0.flip();
+        rBuffer.put(rBuffer0);
+        rBuffer.flip();
+        rBuffer0.clear();
+
+        readRequest = server.bgRead(ch,rBuffer0);
+    }
+
+    private void readBytes(byte[] msg,int len) throws IOException {
+        int offset=0;
         while (len > 0) {
             int n = Math.min(rBuffer.remaining(),len);
             rBuffer.get(msg,offset,n);
             offset+=n;
             len-=n;
             if(n==0){
-                rBuffer.clear();
-                if(ch.read(rBuffer)==-1) {
-                    throw new IOException("stream closed");
-                }
-                rBuffer.flip();
+                fillBuffer();
             }
         }
     }

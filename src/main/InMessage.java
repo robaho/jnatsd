@@ -10,12 +10,14 @@ class InMessage {
     final byte[] data;
     final CharSeq subject;
     final CharSeq reply;
+    final int datalen;
 
-    public InMessage(Connection connection, CharSeq subject, CharSeq reply, byte[] data) {
+    public InMessage(Connection connection, CharSeq subject, CharSeq reply, byte[] data, int datalen) {
         this.connection=connection;
         this.subject=subject;
         this.reply=reply;
         this.data=data;
+        this.datalen=datalen;
     }
     public String toString() {
         return subject+":"+reply+":"+connection.getRemote();
