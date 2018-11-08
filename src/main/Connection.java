@@ -15,7 +15,7 @@ import java.util.logging.Level;
 
 class Connection {
     private final Server server;
-    private SocketChannel ch;
+    SocketChannel ch;
     private final String remote;
     private volatile boolean closed;
     private int clientID;
@@ -26,12 +26,12 @@ class Connection {
     private long nMsgsWrite;
 
     private final ByteBuffer rBuffer = ByteBuffer.allocateDirect(64*1024);
-    private final ByteBuffer rBuffer0 = ByteBuffer.allocateDirect(64*1024);
+    final ByteBuffer rBuffer0 = ByteBuffer.allocateDirect(64*1024);
 
     private final ByteBuffer wBuffer = ByteBuffer.allocateDirect(64*1024);
-    private final ByteBuffer wBuffer0 = ByteBuffer.allocateDirect(64*1024);
+    final ByteBuffer wBuffer0 = ByteBuffer.allocateDirect(64*1024);
 
-    private Future<Boolean> writeRequest,readRequest;
+    Future<Boolean> writeRequest,readRequest;
 
     public Connection(Server server, SocketChannel ch) throws IOException {
         this.ch=ch;
@@ -43,7 +43,10 @@ class Connection {
 
         rBuffer.flip();
 
-        readRequest = server.bgRead(ch,rBuffer0);
+    }
+
+    void processConnection() throws IOException {
+        server.bgRead(this);
 
         write(server.getInfoAsJSON(this).getBytes());
         flush();
@@ -51,9 +54,7 @@ class Connection {
         if(server.isTLSRequired()){
             upgradeToSSL();
         }
-    }
 
-    void processConnection(){
         Thread reader = new Thread(new ConnectionReader(),"Reader("+getRemote()+")");
         reader.start();
     }
@@ -268,7 +269,7 @@ class Connection {
 
         wBuffer.clear();
 
-        writeRequest = server.bgWrite(ch, wBuffer0);
+        server.bgWrite(this);
     }
 
     private boolean isVerbose() {
@@ -382,7 +383,7 @@ class Connection {
         rBuffer.flip();
         rBuffer0.clear();
 
-        readRequest = server.bgRead(ch,rBuffer0);
+        server.bgRead(this);
     }
 
     private void readBytes(byte[] msg,int len) throws IOException {

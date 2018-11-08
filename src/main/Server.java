@@ -6,7 +6,6 @@ import com.robaho.jnatsd.util.RingBuffer;
 
 import java.io.*;
 import java.net.InetSocketAddress;
-import java.nio.ByteBuffer;
 import java.nio.channels.*;
 import java.util.*;
 import java.util.concurrent.*;
@@ -18,7 +17,7 @@ import java.util.logging.Logger;
 
 public class Server {
     private int port;
-    private Thread listener, flusher, writer, reader;
+    private Thread listener, flusher, io;
     private Set<Connection> connections = Collections.newSetFromMap(new ConcurrentHashMap<>());
     Logger logger = Logger.getLogger("server");
 
@@ -47,38 +46,42 @@ public class Server {
 
     private Selector selector;
 
-    public Future<Boolean> bgWrite(SocketChannel c,ByteBuffer bb) {
-        IOFuture f = new IOFuture(c,bb);
-        while(!wqueue.offer(f));
-        if(writerSync.compareAndSet(false,true)) {
-            LockSupport.unpark(writer);
-        }
+    public void bgWrite(Connection c) {
+        IOFuture f = new IOFuture();
+        c.writeRequest = f;
 
-        return f;
+        synchronized(c) {
+            SelectionKey key = c.ch.keyFor(selector);
+            if(key==null || !key.isValid()){
+                f.setResult(true);
+            } else {
+                key.interestOps(key.interestOps() | SelectionKey.OP_WRITE);
+            }
+        }
+        selector.wakeup();
     }
 
-    public Future<Boolean> bgRead(SocketChannel c, ByteBuffer bb) {
-        IOFuture f = new IOFuture(c,bb);
-//        try {
-//            int n = c.read(bb);
-//            if(n>0){
-//                f.setResult(false);
-//                return f;
-//            }
-//        } catch (IOException e) {
-//            f.setResult(true);
-//            return f;
-//        }
+    public void bgRead(Connection c) {
+        IOFuture f = new IOFuture();
+        c.readRequest = f;
 
-        SelectionKey key = c.keyFor(selector);
-        if(key==null || !key.isValid()){
-            f.setResult(true);
-            return f;
+//        try {
+//            int n = c.ch.read(c.rBuffer0);
+//            if (n > 0) {
+//                f.setResult(false);
+//                return;
+//            }
+//        } catch(Exception ignore){}
+//
+        synchronized(c) {
+            SelectionKey key = c.ch.keyFor(selector);
+            if(key==null || !key.isValid()){
+                f.setResult(true);
+            } else {
+                key.interestOps(key.interestOps() | SelectionKey.OP_READ);
+            }
         }
-        key.attach(f);
-        key.interestOps(SelectionKey.OP_READ);
         selector.wakeup();
-        return f;
     }
 
     private static class SubscriptionMatch {
@@ -91,13 +94,9 @@ public class Server {
     private final AtomicBoolean writerSync = new AtomicBoolean();
 
     private class IOFuture implements Future<Boolean> {
-        SocketChannel c;
-        ByteBuffer b;
         Boolean result;
 
-        IOFuture(SocketChannel c, ByteBuffer b){
-            this.c=c;
-            this.b=b;
+        IOFuture(){
         }
 
         @Override
@@ -150,10 +149,9 @@ public class Server {
                         SocketChannel s = socket.accept();
                         s.configureBlocking(false);
 
-                        s.register(selector,0);
-
                         logger.info("Connection from " + s.getRemoteAddress());
                         Connection c = new Connection(Server.this, s);
+                        s.register(selector,0,c);
                         synchronized (connections) {
                             connections.add(c);
                             LockSupport.unpark(flusher);
@@ -171,11 +169,8 @@ public class Server {
         flusher = new Thread(new Flusher(),"Flusher");
         flusher.start();
 
-        writer = new Thread(new Writer(),"Writer");
-        writer.start();
-
-        reader = new Thread(new Reader(),"Reader");
-        reader.start();
+        io = new Thread(new ReaderWriter(),"ReaderWriter");
+        io.start();
     }
 
     /**
@@ -212,59 +207,38 @@ public class Server {
     /**
      * background writes (flushes) data to socket
      */
-    private class Writer implements Runnable {
-        public void run() {
-            IOFuture f;
-            while (!done) {
-                long deadline = 0;
-                while((f=wqueue.poll())==null){
-                    if(deadline==0)
-                        deadline=System.nanoTime()+spinForTimeoutThreshold*10000;
-                    if(System.nanoTime()>deadline) {
-                        if(writerSync.compareAndSet(true,false))
-                            continue;
-                        LockSupport.park();
-                    }
-                }
-                try {
-                    f.c.write(f.b);
-                    if(!f.b.hasRemaining()){
-                        f.setResult(false);
-                    } else {
-                        if(!wqueue.offer(f)) {
-                            throw new IOException("wqueue is full, too many connections!");
-                        }
-                    }
-                } catch (IOException e) {
-                    f.setResult(true);
-                }
-            }
-        }
-    }
-
-    /**
-     * background writes (flushes) data to socket
-     */
-    private class Reader implements Runnable {
+    private class ReaderWriter implements Runnable {
         public void run() {
 
             while(!done) {
                 try {
                     selector.select();
-                    Iterator i = selector.selectedKeys().iterator();
-                    while(i.hasNext()) {
-                        SelectionKey key = (SelectionKey) i.next();
-                        i.remove();
-                        IOFuture f = (IOFuture) key.attachment();
-                        int result = f.c.read(f.b);
-                        if(result<0){
-                            f.setResult(true);
-                            key.cancel();
-                        } else {
-                            if(result==0)
+                    for(SelectionKey key : selector.selectedKeys()) {
+                        Connection c = (Connection) key.attachment();
+                        if(key.isValid() && key.isReadable()) {
+                            IOFuture f = (IOFuture) c.readRequest;
+                            if(f.isDone())
                                 continue;
-                            key.interestOps(0);
-                            f.setResult(false);
+                            int result = c.ch.read(c.rBuffer0);
+                            if (result < 0) {
+                                f.setResult(true);
+                                key.cancel();
+                            } else {
+                                if (result > 0) {
+                                    key.interestOps(key.interestOps() & (~SelectionKey.OP_READ));
+                                    f.setResult(false);
+                                }
+                            }
+                        }
+                        if(key.isValid() && key.isWritable()){
+                            IOFuture f = (IOFuture) c.writeRequest;
+                            if(f.isDone())
+                                continue;
+                            c.ch.write(c.wBuffer0);
+                            if(!c.wBuffer0.hasRemaining()){
+                                key.interestOps(key.interestOps() & (~SelectionKey.OP_WRITE));
+                                f.setResult(false);
+                            }
                         }
                     }
                 } catch (IOException e) {
