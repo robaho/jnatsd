@@ -122,7 +122,7 @@ class Connection {
                 reply = args[index++];
             }
             int len = args[index].toInt();
-            if(len>msg.length){
+            if(len+2>msg.length){
                 msg = new byte[len+2];
             }
             readBytes(msg,len+2); // read the cr-lf too
