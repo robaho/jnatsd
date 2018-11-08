@@ -123,7 +123,7 @@ class Connection {
             }
             int len = args[index].toInt();
             if(len>msg.length){
-                msg = new byte[len];
+                msg = new byte[len+2];
             }
             readBytes(msg,len+2); // read the cr-lf too
 //            System.out.println("read msg "+msg.length);
