@@ -19,6 +19,7 @@ public class Server {
     private int port;
     private Thread listener, flusher, io;
     private Set<Connection> connections = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    private Set<Connection> toregister = new HashSet();
     Logger logger = Logger.getLogger("server");
 
     private int maxMsgSize = 1024*1024;
@@ -55,6 +56,9 @@ public class Server {
             if(key==null || !key.isValid()){
                 f.setResult(true);
             } else {
+                if((key.interestOps()& SelectionKey.OP_WRITE)!=0){
+                    return;
+                }
                 key.interestOps(key.interestOps() | SelectionKey.OP_WRITE);
             }
         }
@@ -65,19 +69,22 @@ public class Server {
         IOFuture f = new IOFuture();
         c.readRequest = f;
 
-//        try {
-//            int n = c.ch.read(c.rBuffer0);
-//            if (n > 0) {
-//                f.setResult(false);
-//                return;
-//            }
-//        } catch(Exception ignore){}
-//
+        try {
+            int n = c.ch.read(c.rBuffer0);
+            if (n > 0) {
+                f.setResult(false);
+                return;
+            }
+        } catch(Exception ignore){}
+
         synchronized(c) {
             SelectionKey key = c.ch.keyFor(selector);
             if(key==null || !key.isValid()){
                 f.setResult(true);
             } else {
+                if((key.interestOps()& SelectionKey.OP_READ)!=0){
+                    return;
+                }
                 key.interestOps(key.interestOps() | SelectionKey.OP_READ);
             }
         }
@@ -148,15 +155,14 @@ public class Server {
                     try {
                         SocketChannel s = socket.accept();
                         s.configureBlocking(false);
-
                         logger.info("Connection from " + s.getRemoteAddress());
                         Connection c = new Connection(Server.this, s);
-                        s.register(selector,0,c);
-                        synchronized (connections) {
-                            connections.add(c);
-                            LockSupport.unpark(flusher);
+
+                        synchronized (toregister){
+                            toregister.add(c);
                         }
-                        c.processConnection();
+                        selector.wakeup();
+
                     } catch (Exception e) {
                         logger.log(Level.SEVERE,"acceptor failed",e);
                     }
@@ -208,10 +214,30 @@ public class Server {
      * background writes (flushes) data to socket
      */
     private class ReaderWriter implements Runnable {
+        private void addConnections(){
+            if(toregister.isEmpty())
+                return;
+            synchronized (toregister){
+                for(Connection c : toregister){
+                    try {
+                        c.ch.register(selector, 0, c);
+                        synchronized (connections) {
+                            connections.add(c);
+                            LockSupport.unpark(flusher);
+                        }
+                        c.processConnection();
+                    } catch(IOException e){
+                        closeConnection(c);
+                    }
+                }
+                toregister.clear();
+            }
+        }
         public void run() {
 
             while(!done) {
                 try {
+                    addConnections();
                     selector.select();
                     for(SelectionKey key : selector.selectedKeys()) {
                         Connection c = (Connection) key.attachment();
@@ -239,6 +265,10 @@ public class Server {
                                 key.interestOps(key.interestOps() & (~SelectionKey.OP_WRITE));
                                 f.setResult(false);
                             }
+                        }
+                        if(c.closed()){
+                            ((IOFuture)c.writeRequest).setResult(true);
+                            ((IOFuture)c.readRequest).setResult(true);
                         }
                     }
                 } catch (IOException e) {

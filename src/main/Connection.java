@@ -25,11 +25,11 @@ class Connection {
     private long nMsgsRead;
     private long nMsgsWrite;
 
-    private final ByteBuffer rBuffer = ByteBuffer.allocateDirect(64*1024);
-    final ByteBuffer rBuffer0 = ByteBuffer.allocateDirect(64*1024);
+    private final ByteBuffer rBuffer = ByteBuffer.allocateDirect(32*1024);
+    final ByteBuffer rBuffer0 = ByteBuffer.allocateDirect(32*1024);
 
-    private final ByteBuffer wBuffer = ByteBuffer.allocateDirect(64*1024);
-    final ByteBuffer wBuffer0 = ByteBuffer.allocateDirect(64*1024);
+    private final ByteBuffer wBuffer = ByteBuffer.allocateDirect(32*1024);
+    final ByteBuffer wBuffer0 = ByteBuffer.allocateDirect(32*1024);
 
     Future<Boolean> writeRequest,readRequest;
 
@@ -107,7 +107,6 @@ class Connection {
     private static final CharSeq UNSUB = new CharSeq("UNSUB");
     private static final CharSeq CONNECT = new CharSeq("CONNECT");
 
-    private final byte[] crlf = new byte[2];
     private byte[] msg = new byte[1024];
 
     private void processLine(CharSeq line) throws IOException {
