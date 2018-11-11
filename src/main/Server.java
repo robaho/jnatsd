@@ -1,5 +1,6 @@
 package com.robaho.jnatsd;
 
+import com.robaho.jnatsd.util.ChannelIO;
 import com.robaho.jnatsd.util.CharSeq;
 import com.robaho.jnatsd.util.JSON;
 import com.robaho.jnatsd.util.RingBuffer;
@@ -51,6 +52,19 @@ public class Server {
         IOFuture f = new IOFuture();
         c.writeRequest = f;
 
+        synchronized(c.ch) {
+            try {
+                ChannelIO.write(c.fd,c.wBuffer0);
+//                c.ch.write(c.wBuffer0);
+                if (c.wBuffer0.remaining()==0) {
+                    f.setResult(false);
+                    return;
+                }
+            } catch (Exception e) {
+                closeConnection(c);
+            }
+        }
+
         synchronized(c) {
             SelectionKey key = c.ch.keyFor(selector);
             if(key==null || !key.isValid()){
@@ -69,13 +83,18 @@ public class Server {
         IOFuture f = new IOFuture();
         c.readRequest = f;
 
-        try {
-            int n = c.ch.read(c.rBuffer0);
-            if (n > 0) {
-                f.setResult(false);
-                return;
+        synchronized(c.ch) {
+            try {
+//                int n = c.ch.read(c.rBuffer0);
+                int n = ChannelIO.read(c.fd,c.rBuffer0);
+                if (n > 0) {
+                    f.setResult(false);
+                    return;
+                }
+            } catch (Exception e) {
+                closeConnection(c);
             }
-        } catch(Exception ignore){}
+        }
 
         synchronized(c) {
             SelectionKey key = c.ch.keyFor(selector);
@@ -184,18 +203,13 @@ public class Server {
      */
     private class Flusher implements Runnable {
         public void run() {
-            long flushes=0;
             while (!done) {
                 long now = System.nanoTime();
                 for(Connection c : connections) {
                     long nanos = c.lastWrite;
-                    if(nanos!=0 && now-nanos > 1000*1000) {
+                    if(nanos!=0 && now-nanos > 1000*1000*10) {
                         try {
                             c.flush();
-                            flushes++;
-//                            if(flushes%10000==0){
-//                                System.out.println("flushes "+flushes);
-//                            }
                         } catch (IOException e) {
                             logger.log(Level.SEVERE,"unable to flush",e);
                             closeConnection(c);
@@ -204,8 +218,9 @@ public class Server {
                 }
                 if(connections.isEmpty())
                     LockSupport.park();
-                else
-                    LockSupport.parkNanos(1000*1000);
+                else {
+                    LockSupport.parkNanos(1000 * 1000 * 10);
+                }
             }
         }
     }
@@ -241,30 +256,38 @@ public class Server {
                     selector.select();
                     for(SelectionKey key : selector.selectedKeys()) {
                         Connection c = (Connection) key.attachment();
-                        if(key.isValid() && key.isReadable()) {
-                            IOFuture f = (IOFuture) c.readRequest;
-                            if(f.isDone())
-                                continue;
-                            int result = c.ch.read(c.rBuffer0);
-                            if (result < 0) {
-                                f.setResult(true);
-                                key.cancel();
-                            } else {
-                                if (result > 0) {
-                                    key.interestOps(key.interestOps() & (~SelectionKey.OP_READ));
+                        try {
+                            if (key.isValid() && key.isReadable()) {
+                                synchronized (c.ch) {
+                                    IOFuture f = (IOFuture) c.readRequest;
+                                    if (f.isDone())
+                                        continue;
+                                    int result = ChannelIO.read(c.fd, c.rBuffer0);
+                                    // int result = c.ch.read(c.rBuffer0);
+                                    if (result < 0) {
+                                        f.setResult(true);
+                                        key.cancel();
+                                    } else {
+                                        if (result > 0) {
+                                            key.interestOps(key.interestOps() & (~SelectionKey.OP_READ));
+                                            f.setResult(false);
+                                        }
+                                    }
+                                }
+                            }
+                            if (key.isValid() && key.isWritable()) {
+                                IOFuture f = (IOFuture) c.writeRequest;
+                                if (f.isDone())
+                                    continue;
+                                //                            c.ch.write(c.wBuffer0);
+                                ChannelIO.write(c.fd, c.wBuffer0);
+                                if (!c.wBuffer0.hasRemaining()) {
+                                    key.interestOps(key.interestOps() & (~SelectionKey.OP_WRITE));
                                     f.setResult(false);
                                 }
                             }
-                        }
-                        if(key.isValid() && key.isWritable()){
-                            IOFuture f = (IOFuture) c.writeRequest;
-                            if(f.isDone())
-                                continue;
-                            c.ch.write(c.wBuffer0);
-                            if(!c.wBuffer0.hasRemaining()){
-                                key.interestOps(key.interestOps() & (~SelectionKey.OP_WRITE));
-                                f.setResult(false);
-                            }
+                        } catch(IOException e){
+                            closeConnection(c);
                         }
                         if(c.closed()){
                             ((IOFuture)c.writeRequest).setResult(true);
@@ -352,6 +375,7 @@ public class Server {
             if(s.connection==from && from.isEcho())
                 continue;
             s.connection.sendMessage(s, msg);
+            from.wroteTo.add(s.connection);
         }
 
         if(match.groups.isEmpty())
@@ -361,6 +385,7 @@ public class Server {
             List<Subscription> subs = group.getValue();
             Subscription gs = subs.get((int) System.currentTimeMillis() % subs.size());
             gs.connection.sendMessage(gs, msg);
+            from.wroteTo.add(gs.connection);
         }
     }
 
@@ -446,6 +471,12 @@ public class Server {
     }
 
     public static void main(String[] args) throws IOException, InterruptedException {
+        long start = System.nanoTime();
+        for(int i=0;i<10000000;i++) {
+            ChannelIO.dummy(0,0,0);
+        }
+        long diff = System.nanoTime()-start;
+        System.out.println("time = "+(diff/10000000));
         Server server = new Server(4222);
         for(String s : args){
             if("--tls".equals(s)){

@@ -6,10 +6,7 @@ import javax.net.ssl.SSLSocketFactory;
 import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
-import java.util.Arrays;
-import java.util.Iterator;
-import java.util.Map;
-import java.util.TreeMap;
+import java.util.*;
 import java.util.concurrent.Future;
 import java.util.logging.Level;
 
@@ -25,13 +22,18 @@ class Connection {
     private long nMsgsRead;
     private long nMsgsWrite;
 
-    private final ByteBuffer rBuffer = ByteBuffer.allocateDirect(32*1024);
-    final ByteBuffer rBuffer0 = ByteBuffer.allocateDirect(32*1024);
+    private final ByteBuffer rBuffer = ByteBuffer.allocateDirect(64*1024);
+    final ByteBuffer rBuffer0 = ByteBuffer.allocateDirect(64*1024);
 
-    private final ByteBuffer wBuffer = ByteBuffer.allocateDirect(32*1024);
-    final ByteBuffer wBuffer0 = ByteBuffer.allocateDirect(32*1024);
+    private final ByteBuffer wBuffer = ByteBuffer.allocateDirect(64*1024);
+    final ByteBuffer wBuffer0 = ByteBuffer.allocateDirect(64*1024);
 
     Future<Boolean> writeRequest,readRequest;
+
+    /** tracks the connections this has written to before last flush **/
+    Set<Connection> wroteTo = new HashSet();
+
+    final int fd;
 
     public Connection(Server server, SocketChannel ch) throws IOException {
         this.ch=ch;
@@ -43,6 +45,7 @@ class Connection {
 
         rBuffer.flip();
 
+        fd = ChannelIO.getFD(ch);
     }
 
     void processConnection() throws IOException {
@@ -269,6 +272,8 @@ class Connection {
         wBuffer.clear();
 
         server.bgWrite(this);
+
+        lastWrite=0;
     }
 
     private boolean isVerbose() {
@@ -336,6 +341,8 @@ class Connection {
 
         write(in.data,0, in.datalen);
         write(CR_LF);
+
+//        flush();
     }
 
     private final byte[] intToBytes = new byte[32];
@@ -372,6 +379,15 @@ class Connection {
         rBuffer.clear();
 
         try {
+            // in order to improve latency, if we have no more incoming to process, then
+            // flush our previous destinations
+
+            if(!readRequest.isDone()){
+                for(Connection c : wroteTo){
+                    c.flush();
+                }
+                wroteTo.clear();
+            }
             if(readRequest.get())
                 throw new IOException("read failed");
         } catch (Exception e) {
