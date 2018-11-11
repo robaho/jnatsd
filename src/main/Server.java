@@ -471,12 +471,6 @@ public class Server {
     }
 
     public static void main(String[] args) throws IOException, InterruptedException {
-        long start = System.nanoTime();
-        for(int i=0;i<10000000;i++) {
-            ChannelIO.dummy(0,0,0);
-        }
-        long diff = System.nanoTime()-start;
-        System.out.println("time = "+(diff/10000000));
         Server server = new Server(4222);
         for(String s : args){
             if("--tls".equals(s)){

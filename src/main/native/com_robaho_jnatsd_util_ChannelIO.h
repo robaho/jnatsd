@@ -23,14 +23,6 @@ JNIEXPORT jint JNICALL Java_com_robaho_jnatsd_util_ChannelIO_write0
 JNIEXPORT jint JNICALL Java_com_robaho_jnatsd_util_ChannelIO_read0
   (JNIEnv *, jclass, jint, jlong, jint);
 
-/*
- * Class:     com_robaho_jnatsd_util_ChannelIO
- * Method:    dummy
- * Signature: (IJI)I
- */
-JNIEXPORT jint JNICALL Java_com_robaho_jnatsd_util_ChannelIO_dummy
-  (JNIEnv *, jclass, jint, jlong, jint);
-
 #ifdef __cplusplus
 }
 #endif

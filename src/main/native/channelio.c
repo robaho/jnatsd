@@ -23,7 +23,3 @@ JNIEXPORT jint JNICALL Java_com_robaho_jnatsd_util_ChannelIO_read0(JNIEnv *jenv,
          return -1*errno;
       return n;   
 }
-
-JNIEXPORT jint JNICALL Java_com_robaho_jnatsd_util_ChannelIO_dummy  (JNIEnv *jenv, jclass clazz, jint fd, jlong address, jint len){
-    return 0;
-}

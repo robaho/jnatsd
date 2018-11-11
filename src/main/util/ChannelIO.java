@@ -10,7 +10,6 @@ import java.nio.channels.SocketChannel;
 public class ChannelIO {
     private static native int write0(int fd,long address,int len);
     private static native int read0(int fd,long address,int len);
-    public static native int dummy(int fd,long address,int len);
 
     public static int write(int fd, ByteBuffer bb) throws IOException {
         int n = write0(fd,((sun.nio.ch.DirectBuffer)bb).address()+bb.position(),bb.remaining());
