@@ -4,7 +4,7 @@ Java port of nats-io server gnatsd. See [nats-io gnatsd](github.com/nats-io/gnat
 
 The original is written is Go.
 
-Use tag 1.0, master is flux with move to async IO - SSL channels are not supported.
+Use tag 1.0, master is flux with move to async IO - SSL channels are not supported. The code has gone through several iterations in order to increase performance. The latest uses asynchronous IO for better CPU utilitization with multiple clients.
 
 **Recent Changes**
 
