@@ -339,6 +339,8 @@ class Connection {
                 continue;
             if (c == '\n')
                 break;
+            if(len==buffer.length)
+                throw new IOException("line too long");
             buffer[len++]=(byte)c;
         }
 
