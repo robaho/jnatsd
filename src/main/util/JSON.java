@@ -35,7 +35,12 @@ public class JSON {
      * @param o the non-null Object to be initialized
      */
     public static void load(String json, Object o){
-        JsonObject jo = Json.parse(json).asObject();
+        JsonObject jo;
+        try {
+            jo = Json.parse(json).asObject();
+        } catch(RuntimeException e) {
+            throw new IllegalStateException("unable to parse: "+json,e);
+        }
         for(JsonObject.Member m : jo){
             try {
                 Field field = o.getClass().getField(m.getName());
