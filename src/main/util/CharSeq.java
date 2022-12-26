@@ -93,14 +93,14 @@ public final class CharSeq implements CharSequence {
         if(!(o instanceof CharSeq))
             return false;
         CharSeq s0 = (CharSeq) o;
+
         if(hashCode!=s0.hashCode || len!=s0.len)
             return false;
 
         final int off = offset;
         final int off0 = s0.offset;
-        final int l = len;
 
-        for(int i=0;i<l;i++) {
+        for(int i=0;i<len;i++) {
             if(array[off+i]!=s0.array[off0+i])
                 return false;
         }
