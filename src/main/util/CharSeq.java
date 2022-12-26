@@ -127,24 +127,30 @@ public final class CharSeq implements CharSequence {
 
     }
 
+    /** split on spaces, but handle quoted spaces */
     public int split(CharSeq[] segs) {
         int n=0;
         int start=0;
         int hash=0;
+        boolean quoted = false;
 
         final byte[] a = array;
         final int l = len;
 
         for(int i=0;i<l;i++) {
             byte c = a[i];
-            if(c==' '){
+            if(c=='"') {
+                quoted ^= true;
+            }
+            if(c==' ' && !quoted){
                 if(i-start>0) {
                     segs[n++] = new CharSeq(a, start, i - start, hash);
                 }
                 start=i+1;
                 hash=0;
+            } else {
+                hash = hash * 31 + c;
             }
-            hash = hash * 31 + c;
         }
         if(start!=l){
             segs[n++]=new CharSeq(a,start,l-start,hash);

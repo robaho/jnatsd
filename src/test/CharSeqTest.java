@@ -16,12 +16,25 @@ public class CharSeqTest {
         assertEquals(c1,c1);
         assertEquals(c1,c2);
         assertFalse(c2.equals(c3));
-
-        CharSeq[] a = new CharSeq[2];
-
-        CharSeq seq = new CharSeq("This is");
-        seq.split(a);
-        assertEquals(a[0],new CharSeq("This"));
-        assertEquals(a[1],new CharSeq("is"));
     }
+
+    @Test
+    public void testSplit() {
+        CharSeq c1 = new CharSeq("this is a string");
+        CharSeq[] a = new CharSeq[4];
+        c1.split(a);
+
+        assertEquals(new CharSeq("this"),a[0]);
+        assertEquals(new CharSeq("is"),a[1]);
+        assertEquals(new CharSeq("a"),a[2]);
+        assertEquals(new CharSeq("string"),a[3]);
+
+        c1 = new CharSeq("this \"is a\" string");
+        c1.split(a);
+
+        assertEquals(new CharSeq("this"),a[0]);
+        assertEquals(new CharSeq("\"is a\""),a[1]);
+        assertEquals(new CharSeq("string"),a[2]);
+    }
+
 }
