@@ -357,9 +357,7 @@ class Connection {
     }
 
     private CharSeq readLine(byte[] buffer) throws IOException {
-        int len = 0;
-
-        while(true) {
+        for(int len=0;len<buffer.length;) {
             while(!rBuffer.hasRemaining()){
                 fillBuffer();
             }
@@ -373,6 +371,7 @@ class Connection {
             }
             buffer[len++] = (byte) c;
         }
+        throw new IOException("line too long");
     }
 
     private void fillBuffer() throws IOException {
