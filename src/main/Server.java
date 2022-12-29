@@ -52,8 +52,8 @@ public class Server {
 
         synchronized(c.ch) {
             try {
-                ChannelIO.write(c.fd,c.wBuffer0);
-//                c.ch.write(c.wBuffer0);
+//                ChannelIO.write(c.fd,c.wBuffer0);
+                c.ch.write(c.wBuffer0);
                 if (c.wBuffer0.remaining()==0) {
                     f.setResult(false);
                     return;
@@ -83,8 +83,8 @@ public class Server {
 
         synchronized(c.ch) {
             try {
-//                int n = c.ch.read(c.rBuffer0);
-                int n = ChannelIO.read(c.fd,c.rBuffer0);
+                int n = c.ch.read(c.rBuffer0);
+//                int n = ChannelIO.read(c.fd,c.rBuffer0);
                 if (n > 0) {
                     f.setResult(false);
                     return;
@@ -260,8 +260,8 @@ public class Server {
                                     IOFuture f = (IOFuture) c.readRequest;
                                     if (f.isDone())
                                         continue;
-                                    int result = ChannelIO.read(c.fd, c.rBuffer0);
-                                    // int result = c.ch.read(c.rBuffer0);
+//                                    int result = ChannelIO.read(c.fd, c.rBuffer0);
+                                     int result = c.ch.read(c.rBuffer0);
                                     if (result < 0) {
                                         f.setResult(true);
                                         key.cancel();
@@ -277,8 +277,8 @@ public class Server {
                                 IOFuture f = (IOFuture) c.writeRequest;
                                 if (f.isDone())
                                     continue;
-                                //                            c.ch.write(c.wBuffer0);
-                                ChannelIO.write(c.fd, c.wBuffer0);
+                                c.ch.write(c.wBuffer0);
+//                                ChannelIO.write(c.fd, c.wBuffer0);
                                 if (!c.wBuffer0.hasRemaining()) {
                                     key.interestOps(key.interestOps() & (~SelectionKey.OP_WRITE));
                                     f.setResult(false);
