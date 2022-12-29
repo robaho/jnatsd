@@ -67,6 +67,8 @@ public class Server {
                         }
                     } catch (IOException e) {
                         logger.log(Level.FINE,"acceptor failed",e);
+                    } catch (Throwable t) {
+                        t.printStackTrace();
                     }
                 }
 
@@ -215,7 +217,7 @@ public class Server {
         }
         // call connection.close() from background thread since, to
         // avoid deadlock with reader/writer join()
-        ForkJoinPool.commonPool().execute(new Runnable() {
+        Thread.startVirtualThread(new Runnable() {
             @Override
             public void run() {
                 connection.close();

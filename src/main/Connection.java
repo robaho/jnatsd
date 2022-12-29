@@ -25,7 +25,7 @@ class Connection {
     private ConnectionOptions options = new ConnectionOptions();
     private boolean isSSL;
     private CharSeq[] args = new CharSeq[4];
-    private final RingBuffer<OutMessage> queue = new RingBuffer(16*1024);
+    private final RingBuffer<OutMessage> queue = new RingBuffer(1024);
     private Thread writer,reader;
     private long nMsgsRead;
     private long nMsgsWrite;
@@ -40,8 +40,8 @@ class Connection {
 
         socket.setTcpNoDelay(true);
 
-        r = new UnsyncBufferedInputStream(s.getInputStream(),256*1024);
-        w = new UnsyncBufferedOutputStream(s.getOutputStream(),256*1024);
+        r = new UnsyncBufferedInputStream(s.getInputStream(),1024);
+        w = new UnsyncBufferedOutputStream(s.getOutputStream(),1024);
 
         w.write(server.getInfoAsJSON(this).getBytes());
         flush();
@@ -52,11 +52,13 @@ class Connection {
     }
 
     void processConnection(){
-        reader = new Thread(new ConnectionReader(),"Reader("+socket.getRemoteSocketAddress()+")");
-        reader.start();
+//        reader = new Thread(new ConnectionReader(),"Reader("+socket.getRemoteSocketAddress()+")");
+//        reader.start();
+        reader = Thread.startVirtualThread(new ConnectionReader());
 
-        writer = new Thread(new ConnectionWriter(),"Writer("+socket.getRemoteSocketAddress()+")");
-        writer.start();
+//        writer = new Thread(new ConnectionWriter(),"Writer("+socket.getRemoteSocketAddress()+")");
+//        writer.start();
+        writer = Thread.startVirtualThread(new ConnectionWriter());
     }
 
     private class ConnectionReader implements Runnable {
