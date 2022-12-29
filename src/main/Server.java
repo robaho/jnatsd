@@ -3,7 +3,6 @@ package com.robaho.jnatsd;
 import com.robaho.jnatsd.util.ChannelIO;
 import com.robaho.jnatsd.util.CharSeq;
 import com.robaho.jnatsd.util.JSON;
-import com.robaho.jnatsd.util.RingBuffer;
 
 import java.io.*;
 import java.net.InetSocketAddress;
@@ -33,7 +32,6 @@ public class Server {
     private volatile Map<CharSeq, SubscriptionMatch> cache = new ConcurrentHashMap();
     private AtomicInteger clientIDs = new AtomicInteger(0);
     private boolean tlsRequired;
-    private final RingBuffer<IOFuture> wqueue = new RingBuffer<>(1024);
     private volatile boolean done;
 
     static final long spinForTimeoutThreshold = 1000L;
