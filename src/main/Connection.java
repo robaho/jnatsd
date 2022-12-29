@@ -30,9 +30,13 @@ class Connection {
     private long nMsgsRead;
     private long nMsgsWrite;
 
+    private final long connectTime;
+    private int pingCount=0;
+
     public Connection(Server server,Socket s) throws IOException {
         this.socket=s;
         this.server=server;
+        this.connectTime = System.currentTimeMillis();
 
         clientID = server.getNextClientID();
 
@@ -40,11 +44,16 @@ class Connection {
 
         socket.setTcpNoDelay(true);
 
-        r = new UnsyncBufferedInputStream(s.getInputStream(),1024);
-        w = new UnsyncBufferedOutputStream(s.getOutputStream(),1024);
+        socket.setSendBufferSize(32*1024);
+        socket.setReceiveBufferSize(32*1024);
+
+        r = new UnsyncBufferedInputStream(s.getInputStream(),4*1024);
+        w = new UnsyncBufferedOutputStream(s.getOutputStream(),4*1024);
 
         w.write(server.getInfoAsJSON(this).getBytes());
         flush();
+
+        log(Level.INFO,"connected");
 
         if(server.isTLSRequired()){
             upgradeToSSL();
@@ -63,10 +72,14 @@ class Connection {
 
     private class ConnectionReader implements Runnable {
         public void run() {
-            while(true) {
+            while(!closed) {
                 try {
                     readMessages();
+                } catch (EOFException e) {
+                    server.closeConnection(Connection.this);
+                    break;
                 } catch (IOException e) {
+                    log(Level.WARNING,"connection read failed, expected if client closed socket",e);
                     server.closeConnection(Connection.this);
                     break;
                 }
@@ -89,9 +102,10 @@ class Connection {
             } catch (InterruptedException ignore) {
                 // expected when ring buffer is closed
             } catch (IOException e) {
+                log(Level.WARNING,"connection write failed",e);
                 server.closeConnection(Connection.this);
             } catch (Throwable t) {
-                server.logger.log(Level.WARNING,"connection failed",t);
+                log(Level.WARNING,"connection failed",t);
                 server.closeConnection(Connection.this);
             }
         }
@@ -134,7 +148,10 @@ class Connection {
             nMsgsRead++;
             server.queueMessage(new InMessage(this,subject.dup(),reply.dup(),msg));
         } else if (cmd.equalsIgnoreCase(PING)){
-            server.logger.fine("PING!");
+            if(pingCount++==0 && System.currentTimeMillis()-connectTime>500) {
+                log(Level.WARNING,"too long to receive initial PING");
+            }
+            log(Level.FINE,"PING!");
             sendPong();
         } else if (cmd.equalsIgnoreCase(SUB)) {
             CharSeq subject = args[index++];
@@ -148,15 +165,20 @@ class Connection {
             int ssid = args[1].toInt();
             removeSubscription(ssid);
         } else if(cmd.equalsIgnoreCase(CONNECT)){
+            if(System.currentTimeMillis()-connectTime>500) {
+                log(Level.WARNING,"too long to receive CONNECT");
+            }
+            log(Level.FINE,"connection options: "+args[1].toString());
             processConnectionOptions(args[1].toString());
         } else {
-            server.logger.warning("error: "+ line+", "+Arrays.toString(args));
+            log(Level.WARNING,"error: "+ line+", "+Arrays.toString(args));
             sendError("Unknown Protocol Operation");
         }
     }
 
     private static final byte[] PONG = "PONG\r\n".getBytes();
     private synchronized void sendPong() throws IOException {
+        log(Level.FINE,"Pong!");
         w.write(PONG);
         flush();
     }
@@ -286,6 +308,7 @@ class Connection {
         try {
             queue.put(m);
         } catch (InterruptedException e) {
+            server.logger.warning("interrupted, closing connection");
             server.closeConnection(Connection.this);
         }
     }
@@ -329,7 +352,7 @@ class Connection {
         int len=0;
         for (int c = r.read(); ; c = r.read()) {
             if (c == -1)
-                throw new IOException("end of file");
+                throw new EOFException();
             if (c == '\r')
                 continue;
             if (c == '\n')
@@ -372,13 +395,14 @@ class Connection {
         }
 
         try {
+            queue.shutdown();
+
             writer.join();
             reader.join();
-            queue.shutdown();
         } catch (InterruptedException e) {
-            server.logger.log(Level.WARNING,"unable to join reader/writer",e);
+            log(Level.WARNING,"unable to join reader/writer",e);
         }
-        server.logger.fine("connection closed, msgs read "+nMsgsRead+", write "+nMsgsWrite);
+        log(Level.FINE,"connection closed, msgs read "+nMsgsRead+", write "+nMsgsWrite);
     }
 
     public String getRemote() {
@@ -387,6 +411,13 @@ class Connection {
 
     public int getClientID() {
         return clientID;
+    }
+
+    private void log(Level level,String msg,Throwable t) {
+        server.logger.log(level,""+remote+": "+msg,t);
+    }
+    private void log(Level level,String msg) {
+        server.logger.log(level,""+remote+": "+msg);
     }
 
     public static class ConnectionOptions {
