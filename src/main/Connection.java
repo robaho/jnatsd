@@ -40,11 +40,11 @@ class Connection {
 
         socket.setTcpNoDelay(true);
 
-        socket.setSendBufferSize(16*1024);
-        socket.setReceiveBufferSize(16*1024);
+        socket.setSendBufferSize(32*1024);
+        socket.setReceiveBufferSize(32*1024);
 
-        r = new UnsyncBufferedInputStream(s.getInputStream(),1024);
-        w = new UnsyncBufferedOutputStream(s.getOutputStream(),1024);
+        r = new UnsyncBufferedInputStream(s.getInputStream(),2*1024);
+        w = new UnsyncBufferedOutputStream(s.getOutputStream(),2*1024);
 
         w.write(server.getInfoAsJSON(this).getBytes());
         flush();
@@ -379,9 +379,10 @@ class Connection {
         }
 
         try {
+            queue.shutdown();
+
             writer.join();
             reader.join();
-            queue.shutdown();
         } catch (InterruptedException e) {
             server.logger.log(Level.WARNING,"unable to join reader/writer",e);
         }
