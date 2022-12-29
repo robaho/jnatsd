@@ -1,25 +1,8 @@
-**About**
+This branch is experimental to investigate using async io.
 
-Java port of nats-io server gnatsd. See [nats-io gnatsd](github.com/nats-io/gnatsd)
+It is abandoned for several reasons:
 
-The original is written is Go.
-
-Use tag 1.0, master is flux with move to async IO - SSL channels are not supported.
-
-**Recent Changes**
-
-TLS connections are now fully supported.
-
-Most simple options, like 'verbose' work. 
-
-**ToDo**
-
-Need to support "router mode".
-
-Need to support authorization using client certificates.
-
-Use binary search for matching subscriptions.
-
-Purge subscription cache based on "old than X" method.
-
-Port many of the test cases from gnatsd to jnatsd.
+1. The async code is too complex
+2. Required native code to simplify things / improve performance hurting portability
+3. The performance was not better for a reasonable number of subscribers/publishers. I expect this would be different with 1000s.
+4. Most importantly, Project Loom! making all of this async nonsense obsolete. See the 'virtual_threads' branch. 
