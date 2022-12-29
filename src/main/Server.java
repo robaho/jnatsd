@@ -50,28 +50,38 @@ public class Server {
         Map<CharSeq, List<Subscription>> groups = new HashMap<>();
     }
 
-    public void start() throws IOException {
-        ServerSocket socket = new ServerSocket(port);
-
-        listener = new Thread("Listener") {
-            public void run() {
-                while (!done) {
-                    try {
-                        Socket s = socket.accept();
-
-                        logger.info("Connection from " + s.getRemoteSocketAddress());
-                        synchronized (connections) {
-                            Connection c = new Connection(Server.this, s);
-                            connections.add(c);
-                            c.processConnection();
-                        }
-                    } catch (IOException e) {
-                        logger.log(Level.FINE,"acceptor failed",e);
-                    }
-                }
-
+    private class Listener implements Runnable {
+        public void run() {
+            ServerSocket socket = null;
+            try {
+                socket = new ServerSocket(port);
+            } catch (IOException e) {
+                logger.log(Level.SEVERE,"unable to open server socket",e);
+                return;
             }
-        };
+
+            while (!done) {
+                try {
+                    Socket s = socket.accept();
+
+                    logger.info("Connection from " + s.getRemoteSocketAddress());
+                    synchronized (connections) {
+                        Connection c = new Connection(Server.this, s);
+                        connections.add(c);
+                        c.processConnection();
+                    }
+                } catch (IOException e) {
+                    logger.log(Level.FINE,"acceptor failed",e);
+                }
+            }
+        }
+    }
+
+    public void start() throws IOException {
+
+        logger.setLevel(Level.WARNING);
+
+        listener = new Thread(new Listener(),"Listener");
         listener.start();
 
         handler = new Thread(new MessageRouter(),"MessageRouter");

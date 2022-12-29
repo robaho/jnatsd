@@ -40,8 +40,11 @@ class Connection {
 
         socket.setTcpNoDelay(true);
 
-        r = new UnsyncBufferedInputStream(s.getInputStream(),256*1024);
-        w = new UnsyncBufferedOutputStream(s.getOutputStream(),256*1024);
+        socket.setSendBufferSize(16*1024);
+        socket.setReceiveBufferSize(16*1024);
+
+        r = new UnsyncBufferedInputStream(s.getInputStream(),1024);
+        w = new UnsyncBufferedOutputStream(s.getOutputStream(),1024);
 
         w.write(server.getInfoAsJSON(this).getBytes());
         flush();
@@ -61,10 +64,14 @@ class Connection {
 
     private class ConnectionReader implements Runnable {
         public void run() {
-            while(true) {
+            while(!closed) {
                 try {
                     readMessages();
+                } catch (EOFException e) {
+                    server.closeConnection(Connection.this);
+                    break;
                 } catch (IOException e) {
+                    server.logger.log(Level.WARNING,"connection read failed, expected if client closed socket",e);
                     server.closeConnection(Connection.this);
                     break;
                 }
@@ -87,6 +94,7 @@ class Connection {
             } catch (InterruptedException ignore) {
                 // expected when ring buffer is closed
             } catch (IOException e) {
+                server.logger.log(Level.WARNING,"connection write failed",e);
                 server.closeConnection(Connection.this);
             } catch (Throwable t) {
                 server.logger.log(Level.WARNING,"connection failed",t);
@@ -284,6 +292,7 @@ class Connection {
         try {
             queue.put(m);
         } catch (InterruptedException e) {
+            server.logger.warning("interrupted, closing connection");
             server.closeConnection(Connection.this);
         }
     }
@@ -327,7 +336,7 @@ class Connection {
         int len=0;
         for (int c = r.read(); ; c = r.read()) {
             if (c == -1)
-                throw new IOException("end of file");
+                throw new EOFException();
             if (c == '\r')
                 continue;
             if (c == '\n')

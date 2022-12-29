@@ -10,10 +10,13 @@ import java.util.concurrent.atomic.AtomicReferenceArray;
  */
 public class RingBuffer<T> {
     private final AtomicReferenceArray<T> ring;
-    private int head;
+    private volatile int head;
     private final AtomicInteger tail = new AtomicInteger();
     private final int size;
     private volatile boolean shutdown;
+
+    private static final boolean SPINS=true;
+    private static final int SPIN_COUNT=128;
 
     public RingBuffer(int size){
         ring = new AtomicReferenceArray<>(size);
@@ -22,8 +25,9 @@ public class RingBuffer<T> {
 
     private boolean offer(T t) {
         int _tail = tail.get();
-        if(ring.get(_tail)==null){
-            if(tail.compareAndSet(_tail,next(_tail))){
+        int _next_tail = next(_tail);
+        if(ring.get(_tail)==null && _next_tail!=head){
+            if(tail.compareAndSet(_tail,_next_tail)){
                 return ring.compareAndSet(_tail,null,t);
             }
         }
@@ -35,7 +39,7 @@ public class RingBuffer<T> {
      * @throws InterruptedException if interrupted
      */
     public void put(T t) throws InterruptedException {
-        for(int i=0;i<1000;i++) {
+        for(int i=0;SPINS && i<SPIN_COUNT;i++) {
             if(offer(t)) {
                 synchronized (this) {
                     notifyAll();
@@ -46,8 +50,10 @@ public class RingBuffer<T> {
         }
         synchronized (this) {
             while(!shutdown) {
-                if(offer(t))
+                if(offer(t)) {
+                    notifyAll();
                     return;
+                }
                 wait();
             }
             throw new InterruptedException("queue shutdown");
@@ -68,15 +74,17 @@ public class RingBuffer<T> {
      * @throws InterruptedException if interrupted
      */
     public T get() throws InterruptedException {
-        for(int i=0;i<1000;i++) {
+        // try to get without lock in case available was used
+        {
             T t = poll();
-            if(t!=null) {
+            if (t != null) {
                 synchronized (this) {
                     notifyAll();
                 }
                 return t;
             }
         }
+
         synchronized (this) {
             while(!shutdown) {
                 T t = poll();
@@ -90,7 +98,7 @@ public class RingBuffer<T> {
         }
     }
     public boolean available() {
-        for(int i=0;i<1000;i++) {
+        for(int i=0;(i==0 || SPINS) && i<SPIN_COUNT;i++) {
             if(head!=tail.get() || ring.get(tail.get())!=null) {
                 return true;
             }
