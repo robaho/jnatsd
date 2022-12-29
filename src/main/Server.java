@@ -9,9 +9,10 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.locks.LockSupport;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -34,8 +35,6 @@ public class Server {
     private final RingBuffer<InMessage> queue = new RingBuffer<>(64*1024);
     private volatile boolean done;
 
-    static final long spinForTimeoutThreshold = 1000L;
-
     public boolean isTLSRequired() {
         return tlsRequired;
     }
@@ -50,8 +49,6 @@ public class Server {
         Subscription[] subs;
         Map<CharSeq, List<Subscription>> groups = new HashMap<>();
     }
-
-    private final AtomicBoolean handlerSync = new AtomicBoolean();
 
     public void start() throws IOException {
         ServerSocket socket = new ServerSocket(port);
@@ -89,18 +86,12 @@ public class Server {
         public void run() {
             InMessage m;
             while (!done) {
-                long deadline = 0;
-                while((m=queue.poll())==null){
-                    if(deadline==0)
-                        deadline=System.nanoTime()+spinForTimeoutThreshold*10000;
-                    if(System.nanoTime()>deadline) {
-                        if(handlerSync.compareAndSet(true,false))
-                            continue;
-                        LockSupport.park();
-                    }
+                try {
+                    m = queue.get();
+                    routed++;
+                    routeMessage(m);
+                } catch (InterruptedException ignored) {
                 }
-                routed++;
-                routeMessage(m);
             }
         }
     }
@@ -110,9 +101,9 @@ public class Server {
     }
 
     void queueMessage(InMessage m){
-        while(!queue.offer(m));
-        if(handlerSync.compareAndSet(false,true)) {
-            LockSupport.unpark(handler);
+        try {
+            queue.put(m);
+        } catch (InterruptedException ignored) {
         }
     }
 
@@ -211,7 +202,8 @@ public class Server {
 
     public void closeConnection(Connection connection) {
         synchronized (connections) {
-            connections.remove(connection);
+            if(!connections.remove(connection))
+                return;
             ArrayList<Subscription> copy = new ArrayList<>();
             for (Subscription s : subs) {
                 if (s.connection != connection) {
@@ -221,7 +213,14 @@ public class Server {
             subs = copy.toArray(new Subscription[copy.size()]);
             cache = new ConcurrentHashMap<>();
         }
-        connection.close();
+        // call connection.close() from background thread since, to
+        // avoid deadlock with reader/writer join()
+        ForkJoinPool.commonPool().execute(new Runnable() {
+            @Override
+            public void run() {
+                connection.close();
+            }
+        });
         logger.info("connection terminated " + connection.getRemote());
     }
 

@@ -25,8 +25,8 @@ class Connection {
     private ConnectionOptions options = new ConnectionOptions();
     private boolean isSSL;
     private CharSeq[] args = new CharSeq[4];
-    private final RingBuffer<OutMessage> queue = new RingBuffer(8192);
-    private Thread writer;
+    private final RingBuffer<OutMessage> queue = new RingBuffer(16*1024);
+    private Thread writer,reader;
     private long nMsgsRead;
     private long nMsgsWrite;
 
@@ -51,10 +51,8 @@ class Connection {
         }
     }
 
-    private final AtomicBoolean writerSync = new AtomicBoolean();
-
     void processConnection(){
-        Thread reader = new Thread(new ConnectionReader(),"Reader("+socket.getRemoteSocketAddress()+")");
+        reader = new Thread(new ConnectionReader(),"Reader("+socket.getRemoteSocketAddress()+")");
         reader.start();
 
         writer = new Thread(new ConnectionWriter(),"Writer("+socket.getRemoteSocketAddress()+")");
@@ -76,30 +74,23 @@ class Connection {
 
     private class ConnectionWriter implements Runnable {
         public void run() {
-
             OutMessage m=null;
-            while(!closed) {
-                try {
-                    long deadline=0;
-                    while((m=queue.poll())==null && !closed){
-                        if(deadline==0) // the longer the deadline, the more we delay the flush if one is required, hurting latency for individual requests
-                            deadline=System.nanoTime() + Server.spinForTimeoutThreshold;
-                        if(System.nanoTime()>deadline){
-                            if(writerSync.compareAndSet(true,false))
-                                continue;
-                            flush();
-                            LockSupport.park();
-                        }
-                    }
+            try {
+                while (!closed) {
+                    if (!queue.available())
+                        flush();
+                    m = queue.get();
+                    if (m == null)
+                        break;
                     writeMessage(m);
-                } catch (IOException e) {
-                    server.closeConnection(Connection.this);
-                    break;
-                } catch (Exception e) {
-                    server.logger.log(Level.WARNING,"connection failed",e);
-                    server.closeConnection(Connection.this);
-                    break;
                 }
+            } catch (InterruptedException ignore) {
+                // expected when ring buffer is closed
+            } catch (IOException e) {
+                server.closeConnection(Connection.this);
+            } catch (Throwable t) {
+                server.logger.log(Level.WARNING,"connection failed",t);
+                server.closeConnection(Connection.this);
             }
         }
     }
@@ -290,9 +281,11 @@ class Connection {
             return;
 
         OutMessage m = new OutMessage(sub,msg);
-        while(!queue.offer(m) && !closed);
-        if(writerSync.compareAndSet(false,true))
-            LockSupport.unpark(writer);
+        try {
+            queue.put(m);
+        } catch (InterruptedException e) {
+            server.closeConnection(Connection.this);
+        }
     }
 
     private synchronized void writeMessage(OutMessage out) throws IOException {
@@ -348,36 +341,46 @@ class Connection {
     }
 
     private void readPayload(InputStream r,byte[] msg) throws IOException {
-        int len=msg.length;int offset=0;
+        int len=msg.length;
+        int offset=0;
+
         while (len > 0) {
             int read = r.read(msg, offset, len);
+            if(read <0)
+                throw new EOFException();
+
             offset += read;
             len -= read;
         }
+
         r.read();
         r.read(); // skip CR-LF
     }
 
     public void close() {
-        server.logger.fine("msgs read "+nMsgsRead+", write "+nMsgsWrite);
         try {
             flush();
             socket.close();
         } catch (IOException e) {
-            e.printStackTrace();
+//            e.printStackTrace();
         } finally {
-            writer.interrupt();
-            LockSupport.unpark(writer);
             closed=true;
+            reader.interrupt();
+            writer.interrupt();
         }
+
+        try {
+            writer.join();
+            reader.join();
+            queue.shutdown();
+        } catch (InterruptedException e) {
+            server.logger.log(Level.WARNING,"unable to join reader/writer",e);
+        }
+        server.logger.fine("connection closed, msgs read "+nMsgsRead+", write "+nMsgsWrite);
     }
 
     public String getRemote() {
         return remote;
-    }
-
-    public boolean closed() {
-        return closed;
     }
 
     public int getClientID() {
