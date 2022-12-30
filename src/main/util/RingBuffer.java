@@ -1,6 +1,7 @@
 package com.robaho.jnatsd.util;
 
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.concurrent.locks.LockSupport;
@@ -19,9 +20,11 @@ public class RingBuffer<T> {
 
     private static final boolean SPINS=true;
     private static final int SPIN_COUNT=128;
+    private static final long putPauseNS = TimeUnit.MILLISECONDS.toNanos(10);
 
-    private final ConcurrentLinkedQueue<Thread> writers = new ConcurrentLinkedQueue<>();
     private volatile Thread reader;
+    // last caller in put() to efficiently wake at least a writer
+    private volatile Thread writer;
 
     public RingBuffer(int size){
         ring = new AtomicReferenceArray<>(size);
@@ -44,26 +47,14 @@ public class RingBuffer<T> {
      * @throws InterruptedException if interrupted
      */
     public void put(T t) throws InterruptedException {
-        Thread writer = Thread.currentThread();
-
-        writers.add(writer);
-        for(int i=0;SPINS && i<SPIN_COUNT;i++) {
-            if(offer(t)) {
-                writers.remove(writer);
-                LockSupport.unpark(reader);
-                return;
-            }
-//            Thread.onSpinWait();
-//            LockSupport.parkNanos(1);
-            Thread.yield();
-        }
+        writer=Thread.currentThread();
         while(!shutdown) {
             if(offer(t)) {
-                writers.remove(writer);
+                writer=null;
                 LockSupport.unpark(reader);
                 return;
             }
-            LockSupport.park();
+            LockSupport.parkNanos(putPauseNS);
         }
         throw new InterruptedException("queue shutdown");
     }
@@ -86,8 +77,8 @@ public class RingBuffer<T> {
         while(!shutdown) {
             T t = poll();
             if(t!=null) {
+                LockSupport.unpark(writer);
                 reader=null;
-                LockSupport.unpark(writers.peek());
                 return t;
             }
             LockSupport.park();
@@ -111,9 +102,5 @@ public class RingBuffer<T> {
     public void shutdown() {
         shutdown=true;
         LockSupport.unpark(reader);
-        for(Thread writer : writers) {
-            LockSupport.unpark(writer);
-            writers.remove(writer);
-        }
     }
 }
