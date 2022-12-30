@@ -18,10 +18,13 @@ public class RingBuffer<T> {
     private volatile boolean shutdown;
 
     private static final boolean SPINS=true;
-    private static final int SPIN_COUNT=128;
+    private static final int SPIN_COUNT=1024;
 
     private final ConcurrentLinkedQueue<Thread> writers = new ConcurrentLinkedQueue<>();
     private volatile Thread reader;
+
+    private volatile long putParks,putFast;
+    private volatile long getParks,getFast;
 
     public RingBuffer(int size){
         ring = new AtomicReferenceArray<>(size);
@@ -46,17 +49,18 @@ public class RingBuffer<T> {
     public void put(T t) throws InterruptedException {
         Thread writer = Thread.currentThread();
 
-        writers.add(writer);
         for(int i=0;SPINS && i<SPIN_COUNT;i++) {
             if(offer(t)) {
-                writers.remove(writer);
+                putFast++;
                 LockSupport.unpark(reader);
                 return;
             }
-//            Thread.onSpinWait();
-            LockSupport.parkNanos(1);
+//            LockSupport.parkNanos(1);
 //            Thread.yield();
         }
+
+        putParks++;
+        writers.add(writer);
         while(!shutdown) {
             if(offer(t)) {
                 writers.remove(writer);
@@ -82,31 +86,59 @@ public class RingBuffer<T> {
      * @throws InterruptedException if interrupted
      */
     public T get() throws InterruptedException {
+        boolean parked=false;
         reader=Thread.currentThread();
         while(!shutdown) {
             T t = poll();
             if(t!=null) {
+                if(parked) {
+                    getParks++;
+                } else {
+                    getFast++;
+                }
                 reader=null;
                 LockSupport.unpark(writers.peek());
                 return t;
             }
+            parked=true;
             LockSupport.park();
         }
         throw new InterruptedException("queue shutdown");
     }
-    public boolean available() {
-        for(int i=0;(i==0 || SPINS) && i<SPIN_COUNT;i++) {
-            if(head!=tail.get() || ring.get(tail.get())!=null) {
+    public boolean available(long timeout) {
+        long deadline = System.nanoTime() + timeout;
+
+        for(int i=0;SPINS && i<SPIN_COUNT;i++) {
+            if (ring.get(head) != null) {
                 return true;
             }
-//            Thread.onSpinWait();
-            LockSupport.parkNanos(1);
-//            Thread.yield();
         }
-        return false;
+
+        reader = Thread.currentThread();
+        try {
+            while (true) {
+                if (ring.get(head) != null) {
+                    return true;
+                }
+                long now = System.nanoTime();
+                long diff = deadline-now;
+                if (diff<=0)
+                    return false;
+//            Thread.onSpinWait();
+                LockSupport.parkNanos(diff);
+//                Thread.yield();
+            }
+        } finally {
+            reader=null;
+        }
     }
     private int next(int index) {
         return (++index)%size;
+    }
+
+    public String debug() {
+        return "put parks "+putParks+", fast "+putFast+", get parks "+getParks+", fast "+getFast;
+
     }
     public void shutdown() {
         shutdown=true;

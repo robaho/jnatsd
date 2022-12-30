@@ -10,8 +10,7 @@ import java.util.Arrays;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.TreeMap;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.locks.LockSupport;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 
 class Connection {
@@ -32,6 +31,9 @@ class Connection {
 
     private final long connectTime;
     private int pingCount=0;
+    private long totalSendTime;
+    private long maxSendTime;
+    private long totalSends;
 
     public Connection(Server server,Socket s) throws IOException {
         this.socket=s;
@@ -44,11 +46,11 @@ class Connection {
 
         socket.setTcpNoDelay(true);
 
-        socket.setSendBufferSize(32*1024);
-        socket.setReceiveBufferSize(32*1024);
+        socket.setSendBufferSize(128*1024);
+        socket.setReceiveBufferSize(128*1024);
 
-        r = new UnsyncBufferedInputStream(s.getInputStream(),4*1024);
-        w = new UnsyncBufferedOutputStream(s.getOutputStream(),4*1024);
+        r = new UnsyncBufferedInputStream(s.getInputStream(),64*1024);
+        w = new ChannelOutputStream(s.getChannel(),64*1024);
 
         w.write(server.getInfoAsJSON(this).getBytes());
         flush();
@@ -88,12 +90,28 @@ class Connection {
     }
 
     private class ConnectionWriter implements Runnable {
+        long flushes;
+        long flushtime;
+        long maxFlushTime;
+        long ignores;
         public void run() {
             OutMessage m=null;
             try {
                 while (!closed) {
-                    if (!queue.available())
+                    long ft = 0;
+                    if (!queue.available(TimeUnit.MICROSECONDS.toNanos(500))) {
+                        // cost of flush
+                        ft = System.nanoTime();
                         flush();
+                        long time = System.nanoTime()-ft;
+                        if(time>25000) {
+                            flushes++;
+                            flushtime += time;
+                            maxFlushTime = Math.max(time, maxFlushTime);
+                        } else {
+                            ignores++;
+                        }
+                    }
                     m = queue.get();
                     if (m == null)
                         break;
@@ -108,6 +126,8 @@ class Connection {
                 log(Level.WARNING,"connection failed",t);
                 server.closeConnection(Connection.this);
             }
+//            if(flushes>0)
+//                server.logger.warning("flushes "+flushes+", ignores "+ignores+", avg nanos = "+flushtime/flushes+", max "+maxFlushTime);
         }
     }
 
@@ -185,6 +205,7 @@ class Connection {
 
     private void processConnectionOptions(String json) throws IOException {
         ConnectionOptions opts = new ConnectionOptions();
+        opts.json = json;
         JSON.load(json,opts);
         options = opts;
 
@@ -306,7 +327,12 @@ class Connection {
 
         OutMessage m = new OutMessage(sub,msg);
         try {
+            long start = System.nanoTime();
             queue.put(m);
+            long time = System.nanoTime()-start;
+            totalSendTime +=time;
+            totalSends++;
+            maxSendTime = Math.max(time,maxSendTime);
         } catch (InterruptedException e) {
             server.logger.warning("interrupted, closing connection");
             server.closeConnection(Connection.this);
@@ -402,7 +428,10 @@ class Connection {
         } catch (InterruptedException e) {
             log(Level.WARNING,"unable to join reader/writer",e);
         }
-        log(Level.FINE,"connection closed, msgs read "+nMsgsRead+", write "+nMsgsWrite);
+        log(Level.WARNING,"connection closed, msgs read "+nMsgsRead+", write "+nMsgsWrite+
+                " send avg "+(totalSends>0 ? totalSendTime/totalSends : 0)+
+                " max "+maxSendTime+
+                " queue: "+queue.debug());
     }
 
     public String getRemote() {
@@ -430,6 +459,7 @@ class Connection {
         public String auth_token;
         public String user;
         public String pass;
+        public String json;
     }
 
 }

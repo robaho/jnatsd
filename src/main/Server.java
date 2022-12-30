@@ -5,8 +5,11 @@ import com.robaho.jnatsd.util.JSON;
 import com.robaho.jnatsd.util.RingBuffer;
 
 import java.io.*;
+import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketAddress;
+import java.nio.channels.ServerSocketChannel;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -32,7 +35,7 @@ public class Server {
     private volatile Map<CharSeq, SubscriptionMatch> cache = new ConcurrentHashMap();
     private AtomicInteger clientIDs = new AtomicInteger(0);
     private boolean tlsRequired;
-    private final RingBuffer<InMessage> queue = new RingBuffer<>(64*1024);
+    private final RingBuffer<InMessage> queue = new RingBuffer<>(256*1024);
     private volatile boolean done;
 
     public boolean isTLSRequired() {
@@ -52,9 +55,10 @@ public class Server {
 
     private class Listener implements Runnable {
         public void run() {
-            ServerSocket socket = null;
+            ServerSocketChannel socket = null;
             try {
-                socket = new ServerSocket(port,256);
+                socket = ServerSocketChannel.open();
+                socket.bind(new InetSocketAddress(port),256);
             } catch (IOException e) {
                 logger.log(Level.SEVERE,"unable to open server socket",e);
                 return;
@@ -62,7 +66,8 @@ public class Server {
 
             while (!done) {
                 try {
-                    Socket s = socket.accept();
+                    Socket s = socket.accept().socket();
+                    s.getChannel().configureBlocking(true);
                     logger.info("Connection from " + s.getRemoteSocketAddress());
                     Connection c = new Connection(Server.this, s);
                     connections.add(c);
@@ -79,11 +84,15 @@ public class Server {
         logger.setLevel(Level.WARNING);
 //        logger.getParent().getHandlers()[0].setLevel( Level.FINE );
 
-        listener = new Thread(new Listener(),"Listener");
-        listener.start();
+//        listener = new Thread(new Listener(),"Listener");
+//        listener.start();
 
-        handler = new Thread(new MessageRouter(),"MessageRouter");
-        handler.start();
+        handler = Thread.startVirtualThread(new MessageRouter());
+
+        listener = Thread.startVirtualThread(new Listener());
+
+//        handler = new Thread(new MessageRouter(),"MessageRouter");
+//        handler.start();
     }
 
     /**
@@ -231,6 +240,7 @@ public class Server {
             @Override
             public void run() {
                 connection.close();
+                logger.warning("router queue: "+queue.debug());
             }
         });
         logger.info("connection terminated " + connection.getRemote());
