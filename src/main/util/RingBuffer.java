@@ -1,7 +1,6 @@
 package com.robaho.jnatsd.util;
 
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.concurrent.locks.LockSupport;
@@ -20,11 +19,12 @@ public class RingBuffer<T> {
 
     private static final boolean SPINS=true;
     private static final int SPIN_COUNT=128;
-    private static final long putPauseNS = TimeUnit.MILLISECONDS.toNanos(10);
 
+    private final ConcurrentLinkedQueue<Thread> writers = new ConcurrentLinkedQueue<>();
     private volatile Thread reader;
-    // last caller in put() to efficiently wake at least a writer
-    private volatile Thread writer;
+
+    private volatile long putParks,putFast,putYields;
+    private volatile long getParks,getFast;
 
     public RingBuffer(int size){
         ring = new AtomicReferenceArray<>(size);
@@ -47,14 +47,33 @@ public class RingBuffer<T> {
      * @throws InterruptedException if interrupted
      */
     public void put(T t) throws InterruptedException {
-        writer=Thread.currentThread();
-        while(!shutdown) {
+        Thread writer = Thread.currentThread();
+
+        boolean yielded=false;
+        for(int i=0;SPINS && i<SPIN_COUNT;i++) {
             if(offer(t)) {
-                writer=null;
+                putFast++;
                 LockSupport.unpark(reader);
                 return;
             }
-            LockSupport.parkNanos(putPauseNS);
+//            LockSupport.parkNanos(1);
+            if(!yielded) {
+                yielded=true;
+                putYields++;
+
+            }
+            Thread.yield();
+        }
+
+        putParks++;
+        writers.add(writer);
+        while(!shutdown) {
+            if(offer(t)) {
+                writers.remove(writer);
+                LockSupport.unpark(reader);
+                return;
+            }
+            LockSupport.park();
         }
         throw new InterruptedException("queue shutdown");
     }
@@ -73,34 +92,67 @@ public class RingBuffer<T> {
      * @throws InterruptedException if interrupted
      */
     public T get() throws InterruptedException {
+        boolean parked=false;
         reader=Thread.currentThread();
         while(!shutdown) {
             T t = poll();
             if(t!=null) {
-                LockSupport.unpark(writer);
+                if(parked) {
+                    getParks++;
+                } else {
+                    getFast++;
+                }
                 reader=null;
+                LockSupport.unpark(writers.peek());
                 return t;
             }
+            parked=true;
             LockSupport.park();
         }
         throw new InterruptedException("queue shutdown");
     }
-    public boolean available() {
-        for(int i=0;(i==0 || SPINS) && i<SPIN_COUNT;i++) {
-            if(head!=tail.get() || ring.get(tail.get())!=null) {
+    public boolean available(long timeout) {
+        long deadline = System.nanoTime() + timeout;
+
+        for(int i=0;SPINS && i<SPIN_COUNT;i++) {
+            if (ring.get(head) != null) {
                 return true;
             }
-//            Thread.onSpinWait();
-//            LockSupport.parkNanos(1);
             Thread.yield();
         }
-        return false;
+
+        reader = Thread.currentThread();
+        try {
+            while (true) {
+                if (ring.get(head) != null) {
+                    return true;
+                }
+                long now = System.nanoTime();
+                long diff = deadline-now;
+                if (diff<=0)
+                    return false;
+//            Thread.onSpinWait();
+                LockSupport.parkNanos(diff);
+//                Thread.yield();
+            }
+        } finally {
+            reader=null;
+        }
     }
     private int next(int index) {
         return (++index)%size;
     }
+
+    public String debug() {
+        return "put parks "+putParks+", fast "+putFast+", yields "+putYields+", get parks "+getParks+", fast "+getFast;
+
+    }
     public void shutdown() {
         shutdown=true;
         LockSupport.unpark(reader);
+        for(Thread writer : writers) {
+            LockSupport.unpark(writer);
+            writers.remove(writer);
+        }
     }
 }
