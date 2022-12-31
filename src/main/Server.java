@@ -84,15 +84,14 @@ public class Server {
         logger.setLevel(Level.WARNING);
 //        logger.getParent().getHandlers()[0].setLevel( Level.FINE );
 
+//        handler = Thread.startVirtualThread(new MessageRouter());
+        handler = new Thread(new MessageRouter(),"MessageRouter");
+        handler.start();
+
 //        listener = new Thread(new Listener(),"Listener");
 //        listener.start();
-
-        handler = Thread.startVirtualThread(new MessageRouter());
-
         listener = Thread.startVirtualThread(new Listener());
 
-//        handler = new Thread(new MessageRouter(),"MessageRouter");
-//        handler.start();
     }
 
     /**
@@ -118,10 +117,11 @@ public class Server {
     }
 
     void queueMessage(InMessage m){
-        try {
-            queue.put(m);
-        } catch (InterruptedException ignored) {
-        }
+        routeMessage(m);
+//        try {
+//            queue.put(m);
+//        } catch (InterruptedException ignored) {
+//        }
     }
 
     private void routeMessage(InMessage m) {
