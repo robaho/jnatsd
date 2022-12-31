@@ -24,7 +24,7 @@ class Connection {
     private ConnectionOptions options = new ConnectionOptions();
     private boolean isSSL;
     private CharSeq[] args = new CharSeq[4];
-    private final RingBuffer<OutMessage> queue = new RingBuffer(8192);
+    private final RingBuffer<OutMessage> queue = new RingBuffer(2*1024);
     private Thread writer,reader;
     private long nMsgsRead;
     private long nMsgsWrite;
