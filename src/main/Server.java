@@ -115,6 +115,9 @@ public class Server {
     }
 
     void queueMessage(InMessage m){
+//        routeMessage(m);
+        // using an intermediary queue improves throughput by almost 20%. The negative side effect is that
+        // the throughput of producers becomes unbalanced.
         try {
             queue.put(m);
         } catch (InterruptedException ignored) {
