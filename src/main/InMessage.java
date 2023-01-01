@@ -11,6 +11,8 @@ class InMessage {
     final CharSeq subject;
     final CharSeq reply;
 
+    final long when = System.currentTimeMillis();
+
     public InMessage(Connection connection, CharSeq subject, CharSeq reply, byte[] data) {
         this.connection=connection;
         this.subject=subject;

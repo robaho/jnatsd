@@ -125,21 +125,28 @@ public class Server {
     }
 
     private void routeMessage(InMessage m) {
+        try {
 //        System.out.println("received message "+m);
 
-        Map<CharSeq, SubscriptionMatch> _cache = cache;
+            Map<CharSeq, SubscriptionMatch> _cache = cache;
 
-        SubscriptionMatch cached = _cache.get(m.subject);
-        if (cached != null) {
-            routeToMatch(m,cached);
-            return;
+            SubscriptionMatch cached = _cache.get(m.subject);
+            if (cached != null) {
+                routeToMatch(m, cached);
+                return;
+            }
+
+            cached = buildSubscriptionMatch(m.subject);
+            SubscriptionMatch old = _cache.putIfAbsent(cached.subject, cached);
+            if (old != null)
+                cached = old;
+            routeToMatch(m, cached);
+        } finally {
+            long time = System.currentTimeMillis()-m.when;
+            if(time>2000) {
+                logger.log(Level.WARNING,"too long "+time+" ms to process message");
+            }
         }
-
-        cached = buildSubscriptionMatch(m.subject);
-        SubscriptionMatch old = _cache.putIfAbsent(cached.subject,cached);
-        if(old!=null)
-            cached=old;
-        routeToMatch(m,cached);
     }
 
     private SubscriptionMatch buildSubscriptionMatch(CharSeq subject) {
@@ -191,11 +198,7 @@ public class Server {
         for (Subscription s : match.subs) {
             if(s.connection==from && from.isEcho())
                 continue;
-            long start = System.currentTimeMillis();
             s.connection.sendMessage(s, msg);
-            if(System.currentTimeMillis()-start>100) {
-                logger.warning("too slow routing message");
-            }
         }
 
         if(match.groups.isEmpty())
