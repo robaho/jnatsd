@@ -6,14 +6,10 @@ import com.robaho.jnatsd.util.RingBuffer;
 
 import java.io.*;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
 import java.net.Socket;
-import java.net.SocketAddress;
 import java.nio.channels.ServerSocketChannel;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
@@ -118,6 +114,8 @@ public class Server {
 
     void queueMessage(InMessage m){
         routeMessage(m);
+        // using an intermediary queue improves throughput by almost 20%. The negative side effect is that
+        // the throughput of producers becomes unbalanced.
 //        try {
 //            queue.put(m);
 //        } catch (InterruptedException ignored) {
