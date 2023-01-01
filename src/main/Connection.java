@@ -46,8 +46,8 @@ class Connection {
 
         socket.setTcpNoDelay(true);
 
-        socket.setSendBufferSize(128*1024);
-        socket.setReceiveBufferSize(128*1024);
+//        socket.setSendBufferSize(1024*1024);
+//        socket.setReceiveBufferSize(1024*1024);
 
         r = new UnsyncBufferedInputStream(s.getInputStream(),64*1024);
         w = new ChannelOutputStream(s.getChannel(),64*1024);
