@@ -11,6 +11,7 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
 import java.util.logging.Level;
 
 class Connection {
@@ -24,16 +25,13 @@ class Connection {
     private ConnectionOptions options = new ConnectionOptions();
     private boolean isSSL;
     private CharSeq[] args = new CharSeq[4];
-    private final RingBuffer<OutMessage> queue = new RingBuffer(2*1024);
-    private Thread writer,reader;
+    private Thread flusher,reader;
     private long nMsgsRead;
     private long nMsgsWrite;
 
     private final long connectTime;
     private int pingCount=0;
-    private long totalSendTime;
-    private long maxSendTime;
-    private long totalSends;
+    private volatile long lastWriteNanos=0;
 
     public Connection(Server server,Socket s) throws IOException {
         this.socket=s;
@@ -46,11 +44,8 @@ class Connection {
 
         socket.setTcpNoDelay(true);
 
-//        socket.setSendBufferSize(1024*1024);
-//        socket.setReceiveBufferSize(1024*1024);
-
         r = new UnsyncBufferedInputStream(s.getInputStream(),64*1024);
-        w = new ChannelOutputStream(s.getChannel(),64*1024);
+        w = new UnsyncBufferedOutputStream(new ChannelOutputStream(s.getChannel(),64*1024),128);
 
         w.write(server.getInfoAsJSON(this).getBytes());
         flush();
@@ -69,7 +64,7 @@ class Connection {
 
 //        writer = new Thread(new ConnectionWriter(),"Writer("+socket.getRemoteSocketAddress()+")");
 //        writer.start();
-        writer = Thread.startVirtualThread(new ConnectionWriter());
+        flusher = Thread.startVirtualThread(new ConnectionFlusher());
     }
 
     private class ConnectionReader implements Runnable {
@@ -89,45 +84,25 @@ class Connection {
         }
     }
 
-    private class ConnectionWriter implements Runnable {
-        long flushes;
-        long flushtime;
-        long maxFlushTime;
-        long ignores;
+    private class ConnectionFlusher implements Runnable {
         public void run() {
-            OutMessage m=null;
-            try {
-                while (!closed) {
-                    long ft = 0;
-                    if (!queue.available(TimeUnit.MICROSECONDS.toNanos(500))) {
-                        // cost of flush
-                        ft = System.nanoTime();
+            while (!closed) {
+                long now = System.nanoTime();
+                long lw = lastWriteNanos;
+                if (lw != 0 && now - lw > 500) {
+                    try {
                         flush();
-                        long time = System.nanoTime()-ft;
-                        if(time>25000) {
-                            flushes++;
-                            flushtime += time;
-                            maxFlushTime = Math.max(time, maxFlushTime);
-                        } else {
-                            ignores++;
-                        }
+                    } catch (IOException ex) {
+                        log(Level.WARNING,"connection write failed",ex);
+                        server.closeConnection(Connection.this);
                     }
-                    m = queue.get();
-                    if (m == null)
-                        break;
-                    writeMessage(m);
                 }
-            } catch (InterruptedException ignore) {
-                // expected when ring buffer is closed
-            } catch (IOException e) {
-                log(Level.WARNING,"connection write failed",e);
-                server.closeConnection(Connection.this);
-            } catch (Throwable t) {
-                log(Level.WARNING,"connection failed",t);
-                server.closeConnection(Connection.this);
+                if (lw == 0) {
+                    LockSupport.park();
+                } else {
+                    LockSupport.parkNanos(TimeUnit.MICROSECONDS.toNanos(500));
+                }
             }
-//            if(flushes>0)
-//                server.logger.warning("flushes "+flushes+", ignores "+ignores+", avg nanos = "+flushtime/flushes+", max "+maxFlushTime);
         }
     }
 
@@ -266,7 +241,7 @@ class Connection {
         }
     }
 
-    private void addSubscription(CharSeq subject, CharSeq group, int ssid) throws IOException {
+    private synchronized void addSubscription(CharSeq subject, CharSeq group, int ssid) throws IOException {
         server.logger.info("subscribing subject="+subject+",group="+group+",ssid="+ssid);
         Subscription s = new Subscription(this,ssid,subject.dup(),group.dup());
         server.addSubscription(s);
@@ -274,7 +249,7 @@ class Connection {
             sendOK();
     }
 
-    private void removeSubscription(int ssid) throws IOException {
+    private synchronized void removeSubscription(int ssid) throws IOException {
         server.logger.info("un-subscribing ssid = "+ssid);
         Subscription s = new Subscription(this,ssid,CharSeq.EMPTY,CharSeq.EMPTY);
         server.removeSubscription(s);
@@ -298,6 +273,7 @@ class Connection {
 
     private synchronized void flush() throws IOException {
         w.flush();
+        lastWriteNanos=0;
     }
 
     private boolean isVerbose() {
@@ -327,16 +303,22 @@ class Connection {
 
         OutMessage m = new OutMessage(sub,msg);
         try {
-            long start = System.nanoTime();
-            queue.put(m);
-            long time = System.nanoTime()-start;
-            totalSendTime +=time;
-            totalSends++;
-            maxSendTime = Math.max(time,maxSendTime);
-        } catch (InterruptedException e) {
-            server.logger.warning("interrupted, closing connection");
+            writeMessage(m);
+        } catch (IOException e) {
+            server.logger.warning("unable to write message: "+e.getMessage());
             server.closeConnection(Connection.this);
         }
+//        try {
+//            long start = System.nanoTime();
+//            queue.put(m);
+//            long time = System.nanoTime()-start;
+//            totalSendTime +=time;
+//            totalSends++;
+//            maxSendTime = Math.max(time,maxSendTime);
+//        } catch (InterruptedException e) {
+//            server.logger.warning("interrupted, closing connection");
+//            server.closeConnection(Connection.this);
+//        }
     }
 
     private synchronized void writeMessage(OutMessage out) throws IOException {
@@ -361,6 +343,9 @@ class Connection {
         w.write(CR_LF);
         w.write(in.data);
         w.write(CR_LF);
+
+        lastWriteNanos = System.nanoTime();
+        LockSupport.unpark(flusher);
     }
 
     private final byte[] intToBytes = new byte[32];
@@ -417,21 +402,16 @@ class Connection {
         } finally {
             closed=true;
             reader.interrupt();
-            writer.interrupt();
+            flusher.interrupt();
         }
 
         try {
-            queue.shutdown();
-
-            writer.join();
+            flusher.join();
             reader.join();
         } catch (InterruptedException e) {
             log(Level.WARNING,"unable to join reader/writer",e);
         }
-        log(Level.WARNING,"connection closed, msgs read "+nMsgsRead+", write "+nMsgsWrite+
-                " send avg "+(totalSends>0 ? totalSendTime/totalSends : 0)+
-                " max "+maxSendTime+
-                " queue: "+queue.debug());
+        log(Level.WARNING,"connection closed, msgs read "+nMsgsRead+", write "+nMsgsWrite);
     }
 
     public String getRemote() {
