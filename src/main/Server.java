@@ -124,6 +124,7 @@ public class Server {
 //        }
     }
 
+    private long lastSlowWarning;
     private void routeMessage(InMessage m) {
         try {
 //        System.out.println("received message "+m);
@@ -142,9 +143,11 @@ public class Server {
                 cached = old;
             routeToMatch(m, cached);
         } finally {
-            long time = System.currentTimeMillis()-m.when;
-            if(time>2000) {
+            long now = System.currentTimeMillis();
+            long time = now-m.when;
+            if(time>2000 && now-lastSlowWarning>5000) {
                 logger.log(Level.WARNING,"too long "+time+" ms to process message");
+                lastSlowWarning=now;
             }
         }
     }
