@@ -11,6 +11,7 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.LockSupport;
 import java.util.logging.Level;
 
@@ -33,6 +34,9 @@ class Connection {
     private int pingCount=0;
     private volatile long lastWriteNanos=0;
 
+    private final ExclusiveLock lock = new ExclusiveLock();
+    private final AtomicBoolean flushPermit = new AtomicBoolean();
+
     public Connection(Server server,Socket s) throws IOException {
         this.socket=s;
         this.server=server;
@@ -45,7 +49,8 @@ class Connection {
         socket.setTcpNoDelay(true);
 
         r = new UnsyncBufferedInputStream(s.getInputStream(),64*1024);
-        w = new UnsyncBufferedOutputStream(new ChannelOutputStream(s.getChannel(),64*1024),128);
+//        w = new UnsyncBufferedOutputStream(new ChannelOutputStream(s.getChannel(),64*1024),256);
+        w = new ChannelOutputStream(s.getChannel(),64*1024);
 
         w.write(server.getInfoAsJSON(this).getBytes());
         flush();
@@ -89,7 +94,7 @@ class Connection {
             while (!closed) {
                 long now = System.nanoTime();
                 long lw = lastWriteNanos;
-                if (lw != 0 && now - lw > 500) {
+                if (lw != 0 && now - lw > TimeUnit.MICROSECONDS.toNanos(500)) {
                     try {
                         flush();
                     } catch (IOException ex) {
@@ -97,6 +102,7 @@ class Connection {
                         server.closeConnection(Connection.this);
                     }
                 }
+                flushPermit.set(false);
                 if (lw == 0) {
                     LockSupport.park();
                 } else {
@@ -172,10 +178,15 @@ class Connection {
     }
 
     private static final byte[] PONG = "PONG\r\n".getBytes();
-    private synchronized void sendPong() throws IOException {
-        log(Level.FINE,"Pong!");
-        w.write(PONG);
-        flush();
+    private void sendPong() throws IOException {
+        lock.lock();;
+        try {
+            log(Level.FINE,"Pong!");
+            w.write(PONG);
+            flushWithLock();
+        } finally {
+            lock.unlock();
+        }
     }
 
     private void processConnectionOptions(String json) throws IOException {
@@ -189,7 +200,7 @@ class Connection {
         }
     }
 
-    private synchronized void upgradeToSSL() throws IOException {
+    private void upgradeToSSL() throws IOException {
         if(isSSL)
             return;
 
@@ -199,20 +210,27 @@ class Connection {
 
 //        printCiphers(ssf);
 
-        SSLSocket sslSocket =
-                (SSLSocket)ssf.
-                        createSocket(socket,
-                                socket.getInetAddress().getHostAddress(),
-                                socket.getPort(),
-                                false);
-        sslSocket.setUseClientMode(false);
-        sslSocket.startHandshake();
-        socket = sslSocket;
+        lock.lock();
 
-        isSSL=true;
+        try {
+            SSLSocket sslSocket =
+                    (SSLSocket) ssf.
+                            createSocket(socket,
+                                    socket.getInetAddress().getHostAddress(),
+                                    socket.getPort(),
+                                    false);
+            sslSocket.setUseClientMode(false);
+            sslSocket.startHandshake();
+            socket = sslSocket;
 
-        r = new BufferedInputStream(socket.getInputStream());
-        w = new BufferedOutputStream(socket.getOutputStream());
+            isSSL = true;
+
+
+            r = new BufferedInputStream(socket.getInputStream());
+            w = new BufferedOutputStream(socket.getOutputStream());
+        } finally {
+            lock.unlock();
+        }
     }
 
     private void printCiphers(SSLSocketFactory ssf) {
@@ -241,7 +259,7 @@ class Connection {
         }
     }
 
-    private synchronized void addSubscription(CharSeq subject, CharSeq group, int ssid) throws IOException {
+    private void addSubscription(CharSeq subject, CharSeq group, int ssid) throws IOException {
         server.logger.info("subscribing subject="+subject+",group="+group+",ssid="+ssid);
         Subscription s = new Subscription(this,ssid,subject.dup(),group.dup());
         server.addSubscription(s);
@@ -249,7 +267,7 @@ class Connection {
             sendOK();
     }
 
-    private synchronized void removeSubscription(int ssid) throws IOException {
+    private void removeSubscription(int ssid) throws IOException {
         server.logger.info("un-subscribing ssid = "+ssid);
         Subscription s = new Subscription(this,ssid,CharSeq.EMPTY,CharSeq.EMPTY);
         server.removeSubscription(s);
@@ -258,22 +276,40 @@ class Connection {
     }
 
     private static byte[] OK = "+OK\r\n".getBytes();
-    private synchronized void sendOK() throws IOException {
-        w.write(OK);
-        flush();
+    private void sendOK() throws IOException {
+        lock.lock();
+        try {
+            w.write(OK);
+            flushWithLock();
+        } finally {
+            lock.unlock();
+        }
     }
 
-    private synchronized void sendError(Exception e) throws IOException {
+    private void sendError(Exception e) throws IOException {
         sendError(e.toString());
     }
-    private synchronized void sendError(String err) throws IOException {
-        w.write(("-ERR '"+err+"'\r\n").getBytes());
-        flush();
+    private void sendError(String err) throws IOException {
+        lock.lock();
+        try {
+            w.write(("-ERR '" + err + "'\r\n").getBytes());
+            flushWithLock();
+        } finally {
+            lock.unlock();
+        }
     }
 
-    private synchronized void flush() throws IOException {
+    private void flush() throws IOException {
+        lock.lock();
+        try {
+            flushWithLock();
+        } finally {
+            lock.unlock();
+        }
+    }
+    private void flushWithLock() throws IOException {
         w.flush();
-        lastWriteNanos=0;
+        lastWriteNanos = 0;
     }
 
     private boolean isVerbose() {
@@ -303,7 +339,12 @@ class Connection {
 
         OutMessage m = new OutMessage(sub,msg);
         try {
-            writeMessage(m);
+            lock.lock();
+            try {
+                writeMessage(m);
+            } finally {
+                lock.unlock();
+            }
         } catch (IOException e) {
             server.logger.warning("unable to write message: "+e.getMessage());
             server.closeConnection(Connection.this);
@@ -321,7 +362,7 @@ class Connection {
 //        }
     }
 
-    private synchronized void writeMessage(OutMessage out) throws IOException {
+    private void writeMessage(OutMessage out) throws IOException {
         if(out==null)
             return;
 
@@ -345,7 +386,12 @@ class Connection {
         w.write(CR_LF);
 
         lastWriteNanos = System.nanoTime();
-        LockSupport.unpark(flusher);
+        // no need to wake flusher if there is another writing thread
+        if(lock.hasWaiters())
+            return;
+        if(flushPermit.compareAndSet(false,true)) {
+            LockSupport.unpark(flusher);
+        }
     }
 
     private final byte[] intToBytes = new byte[32];
