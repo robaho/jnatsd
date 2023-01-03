@@ -26,16 +26,13 @@ class Connection {
     private ConnectionOptions options = new ConnectionOptions();
     private boolean isSSL;
     private CharSeq[] args = new CharSeq[4];
-    private Thread flusher,reader;
+    private Thread reader;
     private long nMsgsRead;
     private long nMsgsWrite;
-
     private final long connectTime;
     private int pingCount=0;
     private volatile long lastWriteNanos=0;
-
     private final ExclusiveLock lock = new ExclusiveLock();
-    private final AtomicBoolean flushPermit = new AtomicBoolean();
 
     public Connection(Server server,Socket s) throws IOException {
         this.socket=s;
@@ -53,7 +50,7 @@ class Connection {
         w = new ChannelOutputStream(s.getChannel(),64*1024);
 
         w.write(server.getInfoAsJSON(this).getBytes());
-        flush();
+        flushWithLock();
 
         log(Level.INFO,"connected");
 
@@ -66,11 +63,14 @@ class Connection {
 //        reader = new Thread(new ConnectionReader(),"Reader("+socket.getRemoteSocketAddress()+")");
 //        reader.start();
         reader = Thread.startVirtualThread(new ConnectionReader());
-
-//        writer = new Thread(new ConnectionWriter(),"Writer("+socket.getRemoteSocketAddress()+")");
-//        writer.start();
-        flusher = Thread.startVirtualThread(new ConnectionFlusher());
     }
+
+//    @Override
+//    public int compareTo(Object o) {
+//        if(this==o)
+//            return 0;
+//        return Integer.compare(hashCode(),o.hashCode());
+//    }
 
     private class ConnectionReader implements Runnable {
         public void run() {
@@ -84,29 +84,6 @@ class Connection {
                     log(Level.WARNING,"connection read failed, expected if client closed socket",e);
                     server.closeConnection(Connection.this);
                     break;
-                }
-            }
-        }
-    }
-
-    private class ConnectionFlusher implements Runnable {
-        public void run() {
-            while (!closed) {
-                long now = System.nanoTime();
-                long lw = lastWriteNanos;
-                if (lw != 0 && now - lw > TimeUnit.MICROSECONDS.toNanos(500)) {
-                    try {
-                        flush();
-                    } catch (IOException ex) {
-                        log(Level.WARNING,"connection write failed",ex);
-                        server.closeConnection(Connection.this);
-                    }
-                }
-                flushPermit.set(false);
-                if (lw == 0) {
-                    LockSupport.park();
-                } else {
-                    LockSupport.parkNanos(TimeUnit.MICROSECONDS.toNanos(500));
                 }
             }
         }
@@ -298,14 +275,25 @@ class Connection {
             lock.unlock();
         }
     }
-
-    private void flush() throws IOException {
-        lock.lock();
+    boolean maybeFlush() {
+        long lw = lastWriteNanos;
+        if(lw==0 || closed)
+            return true;
+        if(System.nanoTime()-lw<TimeUnit.MICROSECONDS.toNanos(500))
+            return false;
+        if(!lock.tryLock())
+            return true;
         try {
-            flushWithLock();
+            try {
+                if(lastWriteNanos!=0)
+                    flushWithLock();
+            } catch (IOException e) {
+                server.closeConnection(this);
+            }
         } finally {
             lock.unlock();
         }
+        return true;
     }
     private void flushWithLock() throws IOException {
         w.flush();
@@ -341,7 +329,10 @@ class Connection {
         try {
             lock.lock();
             try {
+                long lw = lastWriteNanos;
                 writeMessage(m);
+                if(lw==0)
+                    server.needsFlush(this);
             } finally {
                 lock.unlock();
             }
@@ -386,12 +377,6 @@ class Connection {
         w.write(CR_LF);
 
         lastWriteNanos = System.nanoTime();
-        // no need to wake flusher if there is another writing thread
-        if(lock.hasWaiters())
-            return;
-        if(flushPermit.compareAndSet(false,true)) {
-            LockSupport.unpark(flusher);
-        }
     }
 
     private final byte[] intToBytes = new byte[32];
@@ -441,18 +426,16 @@ class Connection {
 
     public void close() {
         try {
-            flush();
+            flushWithLock();
             socket.close();
         } catch (IOException e) {
 //            e.printStackTrace();
         } finally {
             closed=true;
             reader.interrupt();
-            flusher.interrupt();
         }
 
         try {
-            flusher.join();
             reader.join();
         } catch (InterruptedException e) {
             log(Level.WARNING,"unable to join reader/writer",e);

@@ -10,15 +10,19 @@ import java.net.Socket;
 import java.nio.channels.ServerSocketChannel;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.ConcurrentSkipListSet;
+import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.LockSupport;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 public class Server {
     private int port;
-    private Thread listener, handler;
-    private Set<Connection> connections = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    private Thread listener, handler, flusher;
+    private Set<Connection> connections = new CopyOnWriteArraySet<>();
     Logger logger = Logger.getLogger("server");
 
     private int maxMsgSize = 1024*1024;
@@ -34,12 +38,19 @@ public class Server {
     private final RingBuffer<InMessage> queue = new RingBuffer<>(256*1024);
     private volatile boolean done;
 
+    private final AtomicBoolean flushPermit = new AtomicBoolean();
+
     public boolean isTLSRequired() {
         return tlsRequired;
     }
 
     public int getMaxMsgSize() {
         return maxMsgSize;
+    }
+
+    public void needsFlush(Connection connection) {
+        if(flushPermit.compareAndSet(false,true))
+            LockSupport.unpark(flusher);
     }
 
     private static class SubscriptionMatch {
@@ -88,6 +99,10 @@ public class Server {
 //        listener.start();
         listener = Thread.startVirtualThread(new Listener());
 
+        flusher = new Thread(new Flusher(),"Flusher");
+        flusher.start();
+//        flusher = Thread.startVirtualThread(new Flusher());
+
     }
 
     /**
@@ -103,6 +118,27 @@ public class Server {
                     routed++;
                     routeMessage(m);
                 } catch (InterruptedException ignored) {
+                }
+            }
+        }
+    }
+
+    private class Flusher implements Runnable {
+        @Override
+        public void run() {
+            while(!done) {
+                boolean delayPark = false;
+                for(Connection c : connections) {
+                    if(!c.maybeFlush()) {
+                        delayPark=true;
+                    }
+                }
+                if(delayPark) {
+                    LockSupport.parkNanos(TimeUnit.MICROSECONDS.toNanos(500));
+                } else {
+                    if (flushPermit.compareAndSet(true, false))
+                        continue;
+                    LockSupport.park();
                 }
             }
         }
@@ -219,6 +255,8 @@ public class Server {
         listener.join();
         handler.interrupt();
         handler.join();
+        flusher.interrupt();
+        flusher.join();
     }
 
     public void waitTillDone() throws InterruptedException {
@@ -244,7 +282,6 @@ public class Server {
             @Override
             public void run() {
                 connection.close();
-                logger.warning("router queue: "+queue.debug());
             }
         });
         logger.info("connection terminated " + connection.getRemote());
