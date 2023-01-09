@@ -11,18 +11,17 @@ import java.net.Socket;
 import java.net.SocketAddress;
 import java.nio.channels.ServerSocketChannel;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.LockSupport;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 public class Server {
     private int port;
-    private Thread listener, handler;
-    private Set<Connection> connections = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    private Thread listener, handler, flusher;
+    private Set<Connection> connections = new CopyOnWriteArraySet<>();
     Logger logger = Logger.getLogger("server");
 
     private int maxMsgSize = 1024*1024;
@@ -35,8 +34,9 @@ public class Server {
     private volatile Map<CharSeq, SubscriptionMatch> cache = new ConcurrentHashMap();
     private AtomicInteger clientIDs = new AtomicInteger(0);
     private boolean tlsRequired;
-    private final RingBuffer<InMessage> queue = new RingBuffer<>(256*1024);
     private volatile boolean done;
+
+    private final AtomicBoolean flushPermit = new AtomicBoolean();
 
     public boolean isTLSRequired() {
         return tlsRequired;
@@ -44,6 +44,11 @@ public class Server {
 
     public int getMaxMsgSize() {
         return maxMsgSize;
+    }
+
+    public void needsFlush(Connection connection) {
+        if(flushPermit.compareAndSet(false,true))
+            LockSupport.unpark(flusher);
     }
 
     private static class SubscriptionMatch {
@@ -69,13 +74,11 @@ public class Server {
                     Socket s = socket.accept().socket();
                     s.getChannel().configureBlocking(true);
                     logger.info("Connection from " + s.getRemoteSocketAddress());
-                    synchronized (connections) {
-                        Connection c = new Connection(Server.this, s);
-                        connections.add(c);
-                        c.processConnection();
-                    }
+                    Connection c = new Connection(Server.this, s);
+                    connections.add(c);
+                    c.processConnection();
                 } catch (IOException e) {
-                    logger.log(Level.FINE,"acceptor failed",e);
+                    logger.log(Level.WARNING,"acceptor failed",e);
                 }
             }
         }
@@ -88,23 +91,26 @@ public class Server {
         listener = new Thread(new Listener(),"Listener");
         listener.start();
 
-        handler = new Thread(new MessageRouter(),"MessageRouter");
-        handler.start();
+        flusher = new Thread(new Flusher(),"Flusher");
+        flusher.start();
     }
 
-    /**
-     * routes 'in' messages to subscribed connections
-     */
-    private class MessageRouter implements Runnable {
-        long routed =0;
+    private class Flusher implements Runnable {
+        @Override
         public void run() {
-            InMessage m;
-            while (!done) {
-                try {
-                    m = queue.get();
-                    routed++;
-                    routeMessage(m);
-                } catch (InterruptedException ignored) {
+            while(!done) {
+                boolean delayPark = false;
+                for(Connection c : connections) {
+                    if(!c.maybeFlush()) {
+                        delayPark=true;
+                    }
+                }
+                if(delayPark) {
+                    LockSupport.parkNanos(TimeUnit.MICROSECONDS.toNanos(500));
+                } else {
+                    if (flushPermit.compareAndSet(true, false))
+                        continue;
+                    LockSupport.park();
                 }
             }
         }
@@ -115,13 +121,7 @@ public class Server {
     }
 
     void queueMessage(InMessage m){
-//        routeMessage(m);
-        // using an intermediary queue improves throughput by almost 20%. The negative side effect is that
-        // the throughput of producers becomes unbalanced.
-        try {
-            queue.put(m);
-        } catch (InterruptedException ignored) {
-        }
+        routeMessage(m);
     }
 
     private long lastSlowWarning;
@@ -221,6 +221,8 @@ public class Server {
         listener.join();
         handler.interrupt();
         handler.join();
+        flusher.interrupt();
+        flusher.join();
     }
 
     public void waitTillDone() throws InterruptedException {
@@ -246,7 +248,6 @@ public class Server {
             @Override
             public void run() {
                 connection.close();
-                logger.warning("router queue: "+queue.debug());
             }
         });
         logger.info("connection terminated " + connection.getRemote());
