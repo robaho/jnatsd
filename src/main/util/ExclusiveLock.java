@@ -32,7 +32,7 @@ public class ExclusiveLock {
             lock.set(false);
         }
     }
-    private final int SPIN_COUNT=32;
+    private final int SPIN_COUNT=1;
     private final WaitList waiters = new WaitList();
     private AtomicReference<Thread> holder = new AtomicReference<>();
 

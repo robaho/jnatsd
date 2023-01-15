@@ -35,7 +35,6 @@ public class Server {
     private volatile Map<CharSeq, SubscriptionMatch> cache = new ConcurrentHashMap();
     private AtomicInteger clientIDs = new AtomicInteger(0);
     private boolean tlsRequired;
-    private final RingBuffer<InMessage> queue = new RingBuffer<>(256*1024);
     private volatile boolean done;
 
     private final AtomicBoolean flushPermit = new AtomicBoolean();
@@ -91,36 +90,10 @@ public class Server {
         logger.setLevel(Level.WARNING);
 //        logger.getParent().getHandlers()[0].setLevel( Level.FINE );
 
-//        handler = Thread.startVirtualThread(new MessageRouter());
-        handler = new Thread(new MessageRouter(),"MessageRouter");
-        handler.start();
-
-//        listener = new Thread(new Listener(),"Listener");
-//        listener.start();
         listener = Thread.startVirtualThread(new Listener());
 
         flusher = new Thread(new Flusher(),"Flusher");
         flusher.start();
-//        flusher = Thread.startVirtualThread(new Flusher());
-
-    }
-
-    /**
-     * routes 'in' messages to subscribed connections
-     */
-    private class MessageRouter implements Runnable {
-        long routed =0;
-        public void run() {
-            InMessage m;
-            while (!done) {
-                try {
-                    m = queue.get();
-                    routed++;
-                    routeMessage(m);
-                } catch (InterruptedException ignored) {
-                }
-            }
-        }
     }
 
     private class Flusher implements Runnable {
